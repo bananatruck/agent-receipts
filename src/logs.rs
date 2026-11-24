@@ -201,8 +201,9 @@ mod pytest_tests {
     }
 }
 fn pytest_summary(text: &str) -> Option<Counts> {
-    static SUMMARY: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"^([0-9].*) in [0-9.]+s(?: \(.*\))?$").unwrap());
+    static SUMMARY: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^([0-9]+ (?:passed|failed|errors?|skipped|deselected|xfailed|xpassed|warnings?)\b.*) in [0-9.]+s(?: \(.*\))?$").unwrap()
+    });
     let summaries: Vec<_> = text
         .lines()
         .filter_map(|line| SUMMARY.captures(line.trim().trim_matches('=').trim()))
@@ -286,7 +287,12 @@ fn javascript_summary(text: &str) -> Option<Counts> {
     let lines: Vec<_> = text
         .lines()
         .map(str::trim)
-        .filter(|line| line.starts_with("Tests:") || line.starts_with("Tests "))
+        .filter(|line| {
+            VITEST.is_match(line)
+                || line
+                    .strip_prefix("Tests:")
+                    .is_some_and(|body| body.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+        })
         .collect();
     let [line] = lines.as_slice() else {
         return None;

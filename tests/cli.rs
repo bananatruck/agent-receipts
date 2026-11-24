@@ -1070,3 +1070,28 @@ fn log_flags_accept_commands_with_equals_arguments() {
     );
     assert_eq!(output.status.code(), Some(0), "{output:?}");
 }
+
+#[test]
+fn normal_stdout_is_not_an_extra_test_summary() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mut failures = Vec::new();
+    for (command, body) in [
+        (
+            "pytest",
+            "100 items processed in 0.05s\n================ 7 passed in 0.10s ================\n",
+        ),
+        ("jest", "Tests for login module\nTests: 7 passed, 7 total\n"),
+    ] {
+        fs::write(log.path(), format!("$ {command}\n{body}")).unwrap();
+        let output = repository.check_with(
+            &format!("Ran `{command}`, 7 passed\n"),
+            &["--log", &format!("{command}={}", log.path().display())],
+            &[],
+        );
+        if output.status.code() != Some(0) {
+            failures.push(stdout(&output));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
