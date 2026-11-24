@@ -592,3 +592,39 @@ fn path_actions_require_the_matching_diff_status() {
         assert_verdict(&output, line, "committed path action", "not checkable");
     }
 }
+
+#[test]
+fn json_output_preserves_verdicts_summary_and_exit_codes() {
+    let repository = Repository::new();
+    repository.write("README.md", "fixture\n");
+    repository.commit();
+    for (report, code, confirmed, contradicted, unknown) in [
+        ("File README.md exists\n", 0, 1, 0, 0),
+        ("File missing.txt exists\nUnknown\n", 1, 0, 1, 1),
+        ("Unknown\n", 3, 0, 0, 1),
+        ("", 3, 0, 0, 0),
+    ] {
+        let output = repository.check_with(report, &["--json"], &[]);
+        assert_eq!(output.status.code(), Some(code), "{output:?}");
+        let text = stdout(&output);
+        assert!(text.starts_with("{\"schema_version\":1,"), "{text}");
+        assert!(text.contains(&format!("\"confirmed\":{confirmed},\"contradicted\":{contradicted},\"not_checkable\":{unknown}")), "{text}");
+        assert!(text.contains(&format!("\"exit_code\":{code}")), "{text}");
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["exit_code"], code);
+        assert_eq!(
+            value["statements"].as_array().unwrap().len(),
+            (confirmed + contradicted + unknown) as usize
+        );
+        if !report.is_empty() {
+            assert_eq!(value["statements"][0]["line"], 1);
+            assert_eq!(
+                value["statements"][0]["statement"],
+                report.lines().next().unwrap()
+            );
+            assert!(value["statements"][0]["evidence"].as_str().is_some());
+        }
+        assert!(output.stderr.is_empty());
+    }
+}
