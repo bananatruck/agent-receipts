@@ -115,7 +115,7 @@ fn checks_commit_and_file_statements_against_head() {
     assert_verdict(&output, 5, "commit exists locally", "contradicted");
     assert_verdict(&output, 6, "file at HEAD", "contradicted");
     assert!(stdout(&output).contains(&hash));
-    assert!(stdout(&output).contains("2 confirmed, 2 contradicted, 0 not checkable"));
+    assert!(stdout(&output).contains("2 confirmed, 2 contradicted, 1 not checkable"));
     assert!(output.stderr.is_empty());
 }
 
@@ -159,7 +159,7 @@ fn quoted_examples_and_nonassertions_cannot_confirm_claims() {
     for line in [3, 6, 8, 9, 10, 11] {
         assert_verdict(&output, line, "unsupported", "not checkable");
     }
-    assert!(stdout(&output).contains("0 confirmed, 0 contradicted, 6 not checkable"));
+    assert!(stdout(&output).contains("0 confirmed, 0 contradicted, 7 not checkable"));
 }
 
 #[test]
@@ -222,7 +222,7 @@ fn unsupported_reports_never_succeed_without_evidence() {
     assert_verdict(&output, 2, "local tracking ref ancestry", "not checkable");
     let output = repository.check("# Synthetic report\n\n");
     assert_eq!(output.status.code(), Some(3), "{output:?}");
-    assert!(stdout(&output).contains("0 confirmed, 0 contradicted, 0 not checkable"));
+    assert!(stdout(&output).contains("0 confirmed, 0 contradicted, 1 not checkable"));
 }
 
 #[test]
@@ -239,7 +239,7 @@ fn reads_markdown_report_files_and_paths_with_spaces() {
     )
     .unwrap();
     let output = repository.check_with("", &["--report", report.path().to_str().unwrap()], &[]);
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
     assert_verdict(&output, 2, "commit exists locally", "confirmed");
     assert_verdict(&output, 3, "file at HEAD", "confirmed");
 }
@@ -917,7 +917,7 @@ fn cleanliness_never_executes_configured_filters() {
         "filter.probe.clean",
         &format!("touch '{}'; cat", marker.display()),
     ]);
-    repository.write("a.txt", "changed and stat dirty\n");
+    repository.write("a.txt", "change\n");
     let output = repository.check("Tree is clean\n");
     assert!(!marker.exists(), "configured filter executed: {output:?}");
     assert_eq!(output.status.code(), Some(3), "{output:?}");
@@ -937,4 +937,31 @@ fn terminal_output_escapes_direction_and_format_controls() {
         );
     }
     assert!(stdout(&output).contains("\\u{202e}"));
+}
+
+#[test]
+fn unverified_markdown_lines_prevent_success_in_both_output_formats() {
+    let repository = Repository::new();
+    repository.write("a.txt", "fixture\n");
+    repository.commit();
+    for line in [
+        "```cargo test``` failed on 5 suites",
+        "~~~cargo test~~~ failed",
+        "    # Indented claim",
+        "    ```",
+        "# Ran `cargo test`, 999 passed",
+    ] {
+        for args in [vec![], vec!["--json"]] {
+            let output = repository.check_with(&format!("Tree is clean\n{line}\n"), &args, &[]);
+            assert_eq!(output.status.code(), Some(3), "{line:?}: {output:?}");
+            if args.is_empty() {
+                assert_verdict(&output, 2, "unsupported", "not checkable");
+            } else {
+                let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(doc["summary"]["not_checkable"], 1);
+                assert_eq!(doc["exit_code"], 3);
+                assert_eq!(doc["statements"].as_array().unwrap().len(), 2);
+            }
+        }
+    }
 }

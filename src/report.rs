@@ -152,16 +152,7 @@ fn fence_marker(line: &str) -> Option<(char, usize)> {
         return None;
     }
     let length = line.chars().take_while(|&value| value == marker).count();
-    (length >= 3).then_some((marker, length))
-}
-
-fn is_heading(line: &str) -> bool {
-    let hashes = line
-        .chars()
-        .take_while(|&character| character == '#')
-        .count();
-    (1..=6).contains(&hashes)
-        && (line.len() == hashes || line[hashes..].starts_with(char::is_whitespace))
+    (length >= 3 && !line[length..].contains(marker)).then_some((marker, length))
 }
 
 fn argument(value: &str) -> Option<&str> {
