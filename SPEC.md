@@ -20,6 +20,7 @@ Blank lines produce no verdict.
 Markdown ATX headings remain unsupported rows and receive not checkable.
 Fenced code, including list-item fences, and lines indented to column four or beyond using spaces or tabs are quoted material and cannot confirm statements.
 List-marker padding of five or more columns is also quoted code.
+Padding tabs advance to four-column stops from the marker's original column, including leading indentation.
 A fence marker indented to column four or beyond cannot close an active fence.
 Inline multi-backtick or tilde spans remain unsupported rows.
 Fence delimiter lines produce no verdict.

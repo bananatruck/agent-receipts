@@ -84,16 +84,17 @@ pub fn parse(text: &str) -> Vec<Statement> {
             let content = PREFIX.replace(source, "");
             let prefix = &source[..source.len() - content.len()];
             let marker_width = prefix.trim_end().len();
+            let marker_end = indentation(raw) + marker_width;
             let padding = prefix[marker_width..]
                 .chars()
-                .fold(marker_width, |column, c| {
+                .fold(marker_end, |column, c| {
                     if c == '\t' {
                         column + 4 - column % 4
                     } else {
                         column + 1
                     }
                 })
-                - marker_width;
+                - marker_end;
             let list_code = padding >= 5;
             let delimiter = if fence.is_none() {
                 content.as_ref()

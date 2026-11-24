@@ -1234,6 +1234,58 @@ fn list_code_indentation_counts_tab_columns() {
     assert_eq!(output.status.code(), Some(3), "{output:?}");
 }
 
+#[test]
+fn list_padding_tabs_include_the_original_marker_column() {
+    let repository = Repository::new();
+    repository.write("a.txt", "fixture\n");
+    repository.commit();
+    for (report, expected) in [
+        ("  - \tTree is clean\n", 3),
+        ("  * \tTree is clean\n", 3),
+        ("1. \t\tTree is clean\n", 3),
+        ("  -\tTree is clean\n", 0),
+        (" - \tTree is clean\n", 0),
+        ("  -    Tree is clean\n", 0),
+    ] {
+        for args in [vec![], vec!["--json"]] {
+            let output = repository.check_with(report, &args, &[]);
+            assert_eq!(
+                output.status.code(),
+                Some(expected),
+                "{report:?}: {}",
+                stdout(&output)
+            );
+            if args.is_empty() {
+                assert_verdict(
+                    &output,
+                    1,
+                    if expected == 3 {
+                        "unsupported"
+                    } else {
+                        "working tree clean"
+                    },
+                    if expected == 3 {
+                        "not checkable"
+                    } else {
+                        "confirmed"
+                    },
+                );
+            } else {
+                let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(doc["exit_code"], expected);
+                assert_eq!(
+                    doc["summary"]["confirmed"],
+                    if expected == 0 { 1 } else { 0 }
+                );
+                assert_eq!(
+                    doc["summary"]["not_checkable"],
+                    if expected == 3 { 1 } else { 0 }
+                );
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn pushed_hashes_reject_prefix_collisions_across_object_types() {
