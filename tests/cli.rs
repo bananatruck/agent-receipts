@@ -664,3 +664,31 @@ fn logs_cannot_hide_runner_failures_or_unfinished_suites() {
         assert_verdict(&output, 1, "test counts in supplied log", expected);
     }
 }
+
+#[test]
+fn diff_scope_is_root_relative_even_with_relative_diff_configuration() {
+    let repository = Repository::new();
+    repository.write("src/a.rs", "before\n");
+    repository.write("outside.txt", "before\n");
+    let base = repository.commit();
+    repository.write("src/a.rs", "after\n");
+    repository.write("outside.txt", "after\n");
+    repository.commit();
+    repository.git(&["config", "diff.relative", "true"]);
+    let report = tempfile::NamedTempFile::new().unwrap();
+    fs::write(
+        report.path(),
+        "Only touched src/a.rs\nDid not modify outside.txt\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-receipts"))
+        .arg("--repo")
+        .arg(repository.path().join("src"))
+        .args(["--base", &base, "--report", report.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    for line in [1, 2] {
+        assert_verdict(&output, line, "committed diff scope", "contradicted");
+    }
+}

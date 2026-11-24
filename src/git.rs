@@ -100,6 +100,7 @@ impl Repository {
             "diff",
             "--no-ext-diff",
             "--no-textconv",
+            "--no-relative",
             "--ignore-submodules=none",
             "--name-status",
             "-z",
