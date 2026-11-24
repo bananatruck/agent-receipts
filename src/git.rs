@@ -129,8 +129,41 @@ impl Repository {
         Ok((base, head, changes))
     }
 
+    fn entry_mode(&self, revision: &str, path: &str) -> Result<Option<String>, String> {
+        let text = successful_text(self.git(&[
+            "--literal-pathspecs",
+            "ls-tree",
+            "-z",
+            "--full-tree",
+            revision,
+            "--",
+            path,
+        ])?)?;
+        Ok(text.split_once(' ').map(|(mode, _)| mode.to_owned()))
+    }
+
+    fn blob_entry(&self, revision: &str, path: &str) -> Result<bool, String> {
+        Ok(matches!(
+            self.entry_mode(revision, path)?.as_deref(),
+            Some("100644" | "100755" | "120000")
+        ))
+    }
+
     pub fn verify_diff(&self, claim: &DiffClaim, base: Option<&str>) -> Finding {
-        let result = self.changes(base).map(|(base, head, changes)| {
+        let result = self.changes(base).and_then(|(base, head, changes)| {
+            match claim {
+                DiffClaim::DidNotModify(path) => {
+                    if !self.blob_entry(&base, path)? && !self.blob_entry(&head, path)? {
+                        return Err("exclusion requires a literal file present at a diff endpoint; directories, missing paths and submodule contents are not checkable".into());
+                    }
+                }
+                DiffClaim::Action(PathAction::Added(path)) if !self.blob_entry(&head, path)? => {
+                    if self.entry_mode(&head, path)?.as_deref() == Some("160000") {
+                        return Err("file actions do not check submodule entries".into());
+                    }
+                }
+                _ => {}
+            }
             let paths: Vec<_> = changes.iter().flat_map(|change| change.paths.iter()).collect();
             let matches = match claim {
                 DiffClaim::OnlyTouched(allowed) => paths.iter().all(|p| allowed.contains(p)),
@@ -141,10 +174,10 @@ impl Repository {
                     PathAction::Renamed { from, to } => change.status.starts_with('R') && change.paths.last() == Some(to) && from.as_ref().is_none_or(|from| change.paths.first() == Some(from)),
                 }),
             };
-            Finding {
+            Ok(Finding {
                 verdict: if matches { Verdict::Confirmed } else { Verdict::Contradicted },
                 evidence: format!("committed diff {base}..{head}: {}; excludes working-tree changes and intermediate edits", changes.iter().map(|c| format!("{} {}", c.status, c.paths.join(" -> "))).collect::<Vec<_>>().join("; ")),
-            }
+            })
         });
         result.unwrap_or_else(|evidence| Finding {
             verdict: Verdict::NotCheckable,

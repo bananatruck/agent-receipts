@@ -692,3 +692,61 @@ fn diff_scope_is_root_relative_even_with_relative_diff_configuration() {
         assert_verdict(&output, line, "committed diff scope", "contradicted");
     }
 }
+
+#[test]
+fn negative_scope_requires_an_existing_literal_file() {
+    let repository = Repository::new();
+    repository.write("src/main.rs", "before\n");
+    repository.write("README.md", "kept\n");
+    let base = repository.commit();
+    repository.write("src/main.rs", "after\n");
+    repository.commit();
+    for path in [
+        "src",
+        "src/*.rs",
+        "src/main.rs..",
+        "missing.txt",
+        "readme.md",
+    ] {
+        let output =
+            repository.check_with(&format!("Did not modify {path}\n"), &["--base", &base], &[]);
+        assert_eq!(output.status.code(), Some(3), "{path}: {output:?}");
+    }
+    let output = repository.check_with(
+        "Did not modify README.md\nOnly touched missing.txt\n",
+        &["--base", "HEAD"],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+}
+
+#[test]
+fn file_actions_do_not_confirm_gitlinks_or_their_contents() {
+    let repository = Repository::new();
+    repository.write("keep.txt", "kept\n");
+    let base = repository.commit();
+    repository.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("160000,{base},sub"),
+    ]);
+    repository.git(&["commit", "-m", "Add link"]);
+    let output = repository.check_with(
+        "Added sub\nCreated sub\nDid not modify sub/file.rs\n",
+        &["--base", &base],
+        &[],
+    );
+    for line in 1..=3 {
+        assert_verdict(
+            &output,
+            line,
+            if line == 3 {
+                "committed diff scope"
+            } else {
+                "committed path action"
+            },
+            "not checkable",
+        );
+    }
+}
