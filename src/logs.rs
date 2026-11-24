@@ -330,8 +330,15 @@ fn runner_failure(command: &str, text: &str, counted_failures: bool) -> bool {
         command.split_whitespace().next(),
         Some("vitest" | "jest" | "npx")
     );
+    let jest = matches!(
+        command.split_whitespace().collect::<Vec<_>>().as_slice(),
+        ["jest", ..] | ["npx", "jest", ..]
+    );
     text.lines().map(str::trim).any(|line| {
         FATAL.is_match(line)
+            || (jest
+                && line.strip_prefix('●').unwrap_or(line).trim_start()
+                    == "Test suite failed to run")
             || (!counted_failures
                 && (FAILED.is_match(line) || (javascript && line.starts_with("FAIL "))))
     })

@@ -113,6 +113,7 @@ Matching passed counts and the explicitly reported failure count confirm the sta
 An omitted failure count means zero failures.
 Differing counts contradict the statement.
 Crashes, compilation errors, internal errors, and unhandled errors cannot be accounted for by a test failure count and contradict the statement.
+Jest suite-loading errors also contradict a statement that accurately reports assertion failure counts.
 Ordinary stdout beginning with FAIL is not a Cargo runner status.
 All log evidence describes only what the supplied text contains, not execution, authenticity, repository identity, or freshness.
 Truncation between completed suites without a visible next-suite start cannot be detected.

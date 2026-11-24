@@ -1136,6 +1136,49 @@ fn incomplete_summaries_cannot_leave_a_completed_summary_confirmed() {
 }
 
 #[test]
+fn suite_loading_errors_cannot_be_accounted_for_by_failed_test_counts() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    for command in ["jest", "npx jest"] {
+        for (diagnostic, suites, expected) in [
+            (
+                "FAIL load.test.js\n  Test suite failed to run\n    Cannot find module './missing'\n",
+                2,
+                1,
+            ),
+            (
+                "FAIL load.test.js\n  ● Test suite failed to run\n    Cannot find module './missing'\n",
+                2,
+                1,
+            ),
+            ("", 1, 0),
+        ] {
+            fs::write(
+                log.path(),
+                format!("$ {command}\n{diagnostic}FAIL assertion.test.js\nTest Suites: {suites} failed, {suites} total\nTests: 1 failed, 1 total\n"),
+            )
+            .unwrap();
+            let output = repository.check_with(
+                &format!("Ran `{command}`, 0 passed, 1 failed\n"),
+                &["--log", &format!("{command}={}", log.path().display())],
+                &[],
+            );
+            assert_eq!(output.status.code(), Some(expected), "{}", stdout(&output));
+            assert_verdict(
+                &output,
+                1,
+                "test counts in supplied log",
+                if expected == 1 {
+                    "contradicted"
+                } else {
+                    "confirmed"
+                },
+            );
+        }
+    }
+}
+
+#[test]
 fn all_file_actions_refuse_submodule_entries() {
     let repository = Repository::new();
     repository.write("a.txt", "fixture\n");
