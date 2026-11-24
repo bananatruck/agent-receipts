@@ -421,3 +421,75 @@ fn stored_symlinks_count_as_blobs_without_reading_the_target() {
     assert_verdict(&output, 1, "file at HEAD", "confirmed");
     assert!(stdout(&output).contains("has type blob"));
 }
+
+#[test]
+fn test_counts_require_a_matching_command_log_and_matching_summary() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    fs::write(log.path(), "$ cargo test\ntest result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n").unwrap();
+    let flag = format!("cargo test={}", log.path().display());
+    let output = repository.check_with(
+        "Ran `cargo test`, 77 passed\nRan `cargo test`, 76 passed\nRan `pytest`, 77 passed\n",
+        &["--log", &flag],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_verdict(&output, 1, "test counts in supplied log", "confirmed");
+    assert_verdict(&output, 2, "test counts in supplied log", "contradicted");
+    assert_verdict(&output, 3, "test counts in supplied log", "not checkable");
+    assert!(stdout(&output).contains("only what the supplied log contains"));
+    let output = repository.check("Ran `cargo test`, 77 passed\n");
+    assert_eq!(output.status.code(), Some(3));
+    assert_verdict(&output, 1, "test counts in supplied log", "not checkable");
+}
+
+#[test]
+fn logs_reject_missing_ambiguous_or_failed_evidence() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    for (command, text, expected) in [
+        ("pytest", "$ pytest\n7 passed in 0.10s\n", "confirmed"),
+        (
+            "pytest",
+            "$ pytest\n1 failed, 7 passed in 0.10s\n",
+            "contradicted",
+        ),
+        ("jest", "$ jest\nTests: 7 passed, 7 total\n", "confirmed"),
+        (
+            "vitest run",
+            "$ vitest run\nTests 7 passed (7)\n",
+            "confirmed",
+        ),
+        (
+            "cargo test",
+            "$ cargo test\ntest result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+            "contradicted",
+        ),
+        (
+            "cargo test",
+            "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+            "not checkable",
+        ),
+        ("pytest", "$ other\n7 passed in 0.10s\n", "not checkable"),
+        (
+            "pytest",
+            "$ pytest\n7 passed in 0.10s\n$ pytest\n7 passed in 0.10s\n",
+            "not checkable",
+        ),
+        ("pytest", "$ pytest\ncollecting ...\n", "not checkable"),
+    ] {
+        fs::write(log.path(), text).unwrap();
+        let flag = format!("{command}={}", log.path().display());
+        let output = repository.check_with(
+            &format!("Ran `{command}`, 7 passed\n"),
+            &["--log", &flag],
+            &[],
+        );
+        assert_verdict(&output, 1, "test counts in supplied log", expected);
+    }
+    for flag in ["bad".to_owned(), "pytest=/nonexistent/log.txt".to_owned()] {
+        let output = repository.check_with("", &["--log", &flag], &[]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+    }
+}

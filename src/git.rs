@@ -63,6 +63,7 @@ impl Repository {
             Claim::Commit(hash) => self.commit(hash),
             Claim::File(path) => self.file(path),
             Claim::CleanTree => self.clean_tree(),
+            Claim::Tests { .. } => Err("no supplied log".into()),
             Claim::Unsupported(reason) => Ok(Finding {
                 verdict: Verdict::NotCheckable,
                 evidence: reason.to_owned(),

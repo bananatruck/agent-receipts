@@ -1,4 +1,5 @@
 mod git;
+mod logs;
 mod report;
 
 use std::fs;
@@ -18,6 +19,9 @@ struct Args {
     /// Working repository to inspect
     #[arg(long, default_value = ".")]
     repo: PathBuf,
+    /// Captured UTF-8 log associated with COMMAND, repeatable
+    #[arg(long = "log", value_name = "COMMAND=PATH")]
+    logs: Vec<String>,
     /// UTF-8 report file, or - for stdin
     #[arg(long, default_value = "-")]
     report: PathBuf,
@@ -50,6 +54,7 @@ fn run(args: Args) -> Result<u8, String> {
             .map_err(|error| format!("cannot read report {}: {error}", args.report.display()))?
     };
     let repository = Repository::open(args.repo)?;
+    let logs = logs::Logs::read(&args.logs)?;
     let mut output = io::BufWriter::new(io::stdout().lock());
     writeln!(output, "LINE\tSTATEMENT\tCHECK\tVERDICT\tEVIDENCE")
         .map_err(|error| error.to_string())?;
@@ -57,7 +62,14 @@ fn run(args: Args) -> Result<u8, String> {
     let mut contradicted = 0;
     let mut unknown = 0;
     for statement in report::parse(&report) {
-        let finding = repository.verify(&statement.claim);
+        let finding = match &statement.claim {
+            report::Claim::Tests {
+                command,
+                passed,
+                failed,
+            } => logs.verify(command, *passed, *failed),
+            _ => repository.verify(&statement.claim),
+        };
         match finding.verdict {
             Verdict::Confirmed => confirmed += 1,
             Verdict::Contradicted => contradicted += 1,

@@ -11,7 +11,16 @@ static COMMIT: LazyLock<Regex> = LazyLock::new(|| {
 static FILE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(?:file (.+) exists|added (.+))$").unwrap());
 
+static TESTS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^ran `([^`]+)`, ([0-9]+) passed(?:, ([0-9]+) failed)?$").unwrap()
+});
+
 pub enum Claim {
+    Tests {
+        command: String,
+        passed: u64,
+        failed: Option<u64>,
+    },
     Commit(String),
     File(String),
     CleanTree,
@@ -21,6 +30,7 @@ pub enum Claim {
 impl Claim {
     pub fn label(&self) -> &'static str {
         match self {
+            Self::Tests { .. } => "test counts in supplied log",
             Self::Commit(_) => "commit exists locally",
             Self::File(_) => "file at HEAD",
             Self::CleanTree => "working tree clean",
@@ -107,6 +117,18 @@ fn argument(value: &str) -> Option<&str> {
 }
 
 fn parse_claim(content: &str) -> Claim {
+    if let Some(c) = TESTS.captures(content) {
+        if let Ok(passed) = c[2].parse() {
+            let failed = c.get(3).map(|v| v.as_str().parse::<u64>());
+            if !matches!(failed, Some(Err(_))) {
+                return Claim::Tests {
+                    command: c[1].to_owned(),
+                    passed,
+                    failed: failed.map(Result::unwrap),
+                };
+            }
+        }
+    }
     if content.eq_ignore_ascii_case("tree is clean")
         || content.eq_ignore_ascii_case("the tree is clean")
     {
