@@ -1,0 +1,9 @@
+LINE	STATEMENT	CHECK	VERDICT	EVIDENCE
+3	Commit 99b79ea exists	commit exists locally	confirmed	local object 99b79ea40adf59eb3a60466c89237d8787c2b5fd has type commit
+4	File src/missing.rs exists	file at HEAD	contradicted	no file entry at HEAD:src/missing.rs
+5	Added src/logs.rs	committed path action	confirmed	committed diff 670dafc0136bcf3dd3f1e0443bd34619ed88945e..99b79ea40adf59eb3a60466c89237d8787c2b5fd: M Cargo.lock; M Cargo.toml; M src/git.rs; A src/logs.rs; M src/main.rs; M src/report.rs; M tests/cli.rs; excludes working-tree changes and intermediate edits
+6	Did not modify LICENSE	committed diff scope	confirmed	committed diff 670dafc0136bcf3dd3f1e0443bd34619ed88945e..99b79ea40adf59eb3a60466c89237d8787c2b5fd: M Cargo.lock; M Cargo.toml; M src/git.rs; A src/logs.rs; M src/main.rs; M src/report.rs; M tests/cli.rs; excludes working-tree changes and intermediate edits
+7	Ran `cargo test --locked --all-targets`, 29 passed	test counts in supplied log	confirmed	cargo test --locked --all-targets: 29 passed, 0 failed; evidence covers only what the supplied log contains, not execution or authenticity
+8	Ran `cargo test --locked --all-targets`, 30 passed	test counts in supplied log	contradicted	cargo test --locked --all-targets: 29 passed, 0 failed; evidence covers only what the supplied log contains, not execution or authenticity
+9	Not pushed	local tracking ref ancestry	not checkable	supply --remote-ref refs/remotes/NAME/BRANCH; no network is used
+Summary: 4 confirmed, 2 contradicted, 1 not checkable

@@ -1,0 +1,694 @@
+use std::fs;
+use std::io::Write;
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
+
+use tempfile::TempDir;
+
+struct Repository {
+    directory: TempDir,
+}
+
+impl Repository {
+    fn new() -> Self {
+        let repository = Self {
+            directory: tempfile::tempdir().unwrap(),
+        };
+        repository.git(&["init", "--initial-branch=main"]);
+        repository.git(&["config", "user.name", "Fixture"]);
+        repository.git(&["config", "user.email", "fixture@example.invalid"]);
+        repository.git(&["config", "commit.gpgsign", "false"]);
+        repository.git(&["config", "core.hooksPath", "/dev/null"]);
+        repository
+    }
+
+    fn path(&self) -> &Path {
+        self.directory.path()
+    }
+
+    fn git(&self, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(self.path())
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    fn write(&self, path: &str, contents: &str) {
+        let path = self.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    fn commit(&self) -> String {
+        self.git(&["add", "."]);
+        self.git(&["commit", "-m", "Add fixture"]);
+        self.git(&["rev-parse", "HEAD"])
+    }
+
+    fn check(&self, report: &str) -> Output {
+        self.check_with(report, &[], &[])
+    }
+
+    fn check_with(&self, report: &str, args: &[&str], environment: &[(&str, &str)]) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_agent-receipts"));
+        command.arg("--repo").arg(self.path()).args(args);
+        for (name, value) in environment {
+            command.env(name, value);
+        }
+        let mut process = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        process
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(report.as_bytes())
+            .unwrap();
+        process.wait_with_output().unwrap()
+    }
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8(output.stdout.clone()).unwrap()
+}
+
+fn assert_verdict(output: &Output, line: usize, check: &str, verdict: &str) {
+    let text = stdout(output);
+    let row = text
+        .lines()
+        .find(|row| row.starts_with(&format!("{line}\t")))
+        .unwrap_or_else(|| panic!("missing line {line}: {text}"));
+    let cells: Vec<_> = row.split('\t').collect();
+    assert_eq!(cells.len(), 5, "{row}");
+    assert_eq!(cells[2], check, "{row}");
+    assert_eq!(cells[3], verdict, "{row}");
+    assert!(!cells[4].is_empty(), "{row}");
+}
+
+#[test]
+fn checks_commit_and_file_statements_against_head() {
+    let repository = Repository::new();
+    repository.write("src/lib.rs", "pub fn value() -> u8 { 7 }\n");
+    let hash = repository.commit();
+    let report = format!(
+        "# Synthetic report\n\n- Committed as `{hash}`.\n- File `src/lib.rs` exists.\n\
+         - Commit 0000000000000000000000000000000000000000 exists.\n\
+         - File `src/missing.rs` exists.\n"
+    );
+    let output = repository.check(&report);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stdout(&output).starts_with("LINE\tSTATEMENT\tCHECK\tVERDICT\tEVIDENCE\n"));
+    assert_verdict(&output, 3, "commit exists locally", "confirmed");
+    assert_verdict(&output, 4, "file at HEAD", "confirmed");
+    assert_verdict(&output, 5, "commit exists locally", "contradicted");
+    assert_verdict(&output, 6, "file at HEAD", "contradicted");
+    assert!(stdout(&output).contains(&hash));
+    assert!(stdout(&output).contains("2 confirmed, 2 contradicted, 0 not checkable"));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn checks_clean_tree_including_untracked_unstaged_and_staged_changes() {
+    let repository = Repository::new();
+    repository.write("README.md", "fixture\n");
+    repository.commit();
+    let output = repository.check("The tree is clean.\n");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_verdict(&output, 1, "working tree clean", "confirmed");
+
+    repository.write("new.txt", "untracked\n");
+    let output = repository.check("Tree is clean\n");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_verdict(&output, 1, "working tree clean", "contradicted");
+    assert!(stdout(&output).contains("?? new.txt"));
+    repository.commit();
+
+    repository.write("README.md", "changed\n");
+    let output = repository.check("Tree is clean\n");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stdout(&output).contains(" M README.md"));
+    repository.git(&["add", "README.md"]);
+    let output = repository.check("Tree is clean\n");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stdout(&output).contains("M  README.md"));
+}
+
+#[test]
+fn quoted_examples_and_nonassertions_cannot_confirm_claims() {
+    let repository = Repository::new();
+    repository.write("README.md", "fixture\n");
+    repository.commit();
+    let output = repository.check(
+        "# Synthetic report\n```text\nTree is clean\n```\n~~~text\n\
+         File README.md exists\n~~~\n> Tree is clean\nIf the tree is clean\n\
+         I did not commit abcdef0\n    Tree is clean\n",
+    );
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    for line in [3, 6, 8, 9, 10, 11] {
+        assert_verdict(&output, line, "unsupported", "not checkable");
+    }
+    assert!(stdout(&output).contains("0 confirmed, 0 contradicted, 6 not checkable"));
+}
+
+#[test]
+fn file_checks_use_head_and_never_follow_workspace_paths() {
+    let repository = Repository::new();
+    repository.write("src/lib.rs", "fixture\n");
+    repository.commit();
+    fs::remove_file(repository.path().join("src/lib.rs")).unwrap();
+    repository.write("src/workspace.rs", "uncommitted\n");
+    let output = repository.check(
+        "File src/lib.rs exists\nFile src/workspace.rs exists\nFile src exists\n\
+         File ../outside.txt exists\nFile /etc/passwd exists\nFile HEAD:src/lib.rs exists\n",
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_verdict(&output, 1, "file at HEAD", "confirmed");
+    for line in [2, 3] {
+        assert_verdict(&output, line, "file at HEAD", "contradicted");
+    }
+    for line in [4, 5, 6] {
+        assert_verdict(&output, line, "unsupported", "not checkable");
+    }
+}
+
+#[test]
+fn commit_checks_require_commit_objects_and_accept_unique_abbreviations() {
+    let repository = Repository::new();
+    repository.write("README.md", "fixture\n");
+    let hash = repository.commit();
+    let blob = repository.git(&["rev-parse", "HEAD:README.md"]);
+    let tree = repository.git(&["rev-parse", "HEAD^{tree}"]);
+    let output = repository.check(&format!(
+        "Commit {} exists\nCommit {blob} exists\nCommit {tree} exists\n",
+        hash[..7].to_ascii_uppercase()
+    ));
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_verdict(&output, 1, "commit exists locally", "confirmed");
+    for line in [2, 3] {
+        assert_verdict(&output, line, "commit exists locally", "contradicted");
+    }
+}
+
+#[test]
+fn unborn_head_leaves_file_evidence_unknown() {
+    let repository = Repository::new();
+    repository.write("README.md", "not committed\n");
+    let output = repository.check("File README.md exists\n");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_verdict(&output, 1, "file at HEAD", "not checkable");
+    assert!(stdout(&output).contains("HEAD does not resolve"));
+}
+
+#[test]
+fn unsupported_reports_never_succeed_without_evidence() {
+    let repository = Repository::new();
+    let output = repository.check("77 tests passed\nNot pushed\nRan `cargo test`\n");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    for line in [1, 3] {
+        assert_verdict(&output, line, "unsupported", "not checkable");
+    }
+    assert_verdict(&output, 2, "local tracking ref ancestry", "not checkable");
+    let output = repository.check("# Synthetic report\n\n");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert!(stdout(&output).contains("0 confirmed, 0 contradicted, 0 not checkable"));
+}
+
+#[test]
+fn reads_markdown_report_files_and_paths_with_spaces() {
+    let repository = Repository::new();
+    repository.write("notes/a b.txt", "fixture\n");
+    let hash = repository.commit();
+    let report = tempfile::NamedTempFile::new().unwrap();
+    fs::write(
+        report.path(),
+        format!(
+            "## Synthetic report\n1. COMMIT `{hash}` EXISTS.\n2) File `notes/a b.txt` exists.\n"
+        ),
+    )
+    .unwrap();
+    let output = repository.check_with("", &["--report", report.path().to_str().unwrap()], &[]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_verdict(&output, 2, "commit exists locally", "confirmed");
+    assert_verdict(&output, 3, "file at HEAD", "confirmed");
+}
+
+#[test]
+fn reports_input_and_repository_errors_on_stderr() {
+    let repository = Repository::new();
+    let missing = repository.path().join("missing-report.txt");
+    let output = repository.check_with("", &["--report", missing.to_str().unwrap()], &[]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot read report"));
+
+    let not_repository = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-receipts"))
+        .args(["--repo", not_repository.path().to_str().unwrap()])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("working Git repository"));
+
+    let output = repository.check_with("", &["--unknown"], &[]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let output = repository.check_with("Tree is clean\n", &[], &[("PATH", "")]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("install Git"));
+}
+
+#[test]
+fn help_and_version_work_without_repository_or_input() {
+    let directory = tempfile::tempdir().unwrap();
+    for option in ["--help", "--version"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_agent-receipts"))
+            .current_dir(directory.path())
+            .arg(option)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert!(stdout(&output).contains("agent-receipts"));
+        if option == "--help" {
+            assert!(stdout(&output).contains("Examples:"));
+        }
+    }
+}
+
+#[test]
+fn output_cannot_inject_terminal_controls_or_table_cells() {
+    let repository = Repository::new();
+    let output = repository.check("Synthetic\ttext\u{1b}[31m\\x\n");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_verdict(&output, 1, "unsupported", "not checkable");
+    let text = stdout(&output);
+    assert!(!text.contains('\u{1b}'));
+    assert!(text.contains("Synthetic\\ttext\\u{1b}[31m\\\\x"));
+}
+
+#[test]
+fn repository_selection_ignores_inherited_git_location() {
+    let repository = Repository::new();
+    let other = Repository::new();
+    other.write("only-there.txt", "fixture\n");
+    other.commit();
+    let git_dir = other.path().join(".git");
+    let output = repository.check_with(
+        "File only-there.txt exists\n",
+        &[],
+        &[("GIT_DIR", git_dir.to_str().unwrap())],
+    );
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_verdict(&output, 1, "file at HEAD", "not checkable");
+}
+
+#[test]
+fn ignores_ignored_files_and_does_not_refresh_the_index() {
+    let repository = Repository::new();
+    repository.write(".gitignore", "ignored.txt\n");
+    repository.commit();
+    repository.write("ignored.txt", "excluded\n");
+    let index = repository.path().join(".git/index");
+    let before = fs::metadata(&index).unwrap().modified().unwrap();
+    let output = repository.check("Tree is clean\n");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(before, fs::metadata(index).unwrap().modified().unwrap());
+}
+
+#[test]
+fn file_paths_are_literal_and_root_relative_from_subdirectories() {
+    let repository = Repository::new();
+    repository.write("src/lib.rs", "fixture\n");
+    repository.commit();
+    let output = repository.check("File `src/*.rs` exists\n");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_verdict(&output, 1, "file at HEAD", "contradicted");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-receipts"))
+        .args(["--repo", repository.path().join("src").to_str().unwrap()])
+        .args(["--report", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut process| {
+            process
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"File src/lib.rs exists\nFile missing.rs exists\n")?;
+            process.wait_with_output()
+        })
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_verdict(&output, 1, "file at HEAD", "confirmed");
+    assert_verdict(&output, 2, "file at HEAD", "contradicted");
+}
+
+#[test]
+fn unreadable_git_evidence_is_unknown_instead_of_a_contradiction() {
+    let repository = Repository::new();
+    repository.write("README.md", "fixture\n");
+    repository.commit();
+    let blob = repository.git(&["rev-parse", "HEAD:README.md"]);
+    let object = repository
+        .path()
+        .join(".git/objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    fs::remove_file(object).unwrap();
+    let output = repository.check("File README.md exists\n");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_verdict(&output, 1, "file at HEAD", "not checkable");
+    assert!(stdout(&output).contains("cannot read object"));
+
+    fs::write(repository.path().join(".git/index"), "invalid index").unwrap();
+    let output = repository.check("Tree is clean\n");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_verdict(&output, 1, "working tree clean", "not checkable");
+}
+
+#[test]
+fn rejects_unpaired_quotes_and_does_not_execute_report_text() {
+    let repository = Repository::new();
+    repository.write("README.md", "fixture\n");
+    let hash = repository.commit();
+    let output = repository.check(&format!(
+        "File `README.md exists\nFile README.md` exists\nCommit `{hash} exists\n\
+         Committed as {hash}`\nCommitted as {hash} if tests pass\n\
+         File `$(touch OWNED)` exists\n"
+    ));
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    for line in 1..=5 {
+        assert_verdict(&output, line, "unsupported", "not checkable");
+    }
+    assert_verdict(&output, 6, "file at HEAD", "contradicted");
+    assert!(!repository.path().join("OWNED").exists());
+    assert!(!Path::new("OWNED").exists());
+}
+
+#[test]
+fn invalid_utf8_reports_are_input_errors() {
+    let repository = Repository::new();
+    let report = tempfile::NamedTempFile::new().unwrap();
+    fs::write(report.path(), [0xff, 0xfe]).unwrap();
+    let output = repository.check_with("", &["--report", report.path().to_str().unwrap()], &[]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot read report"));
+}
+
+#[cfg(unix)]
+#[test]
+fn stored_symlinks_count_as_blobs_without_reading_the_target() {
+    let repository = Repository::new();
+    std::os::unix::fs::symlink("/nonexistent/target", repository.path().join("link")).unwrap();
+    repository.commit();
+    let output = repository.check("File link exists\n");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_verdict(&output, 1, "file at HEAD", "confirmed");
+    assert!(stdout(&output).contains("has type blob"));
+}
+
+#[test]
+fn test_counts_require_a_matching_command_log_and_matching_summary() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    fs::write(log.path(), "$ cargo test\ntest result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n").unwrap();
+    let flag = format!("cargo test={}", log.path().display());
+    let output = repository.check_with(
+        "Ran `cargo test`, 77 passed\nRan `cargo test`, 76 passed\nRan `pytest`, 77 passed\n",
+        &["--log", &flag],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_verdict(&output, 1, "test counts in supplied log", "confirmed");
+    assert_verdict(&output, 2, "test counts in supplied log", "contradicted");
+    assert_verdict(&output, 3, "test counts in supplied log", "not checkable");
+    assert!(stdout(&output).contains("only what the supplied log contains"));
+    let output = repository.check("Ran `cargo test`, 77 passed\n");
+    assert_eq!(output.status.code(), Some(3));
+    assert_verdict(&output, 1, "test counts in supplied log", "not checkable");
+}
+
+#[test]
+fn logs_reject_missing_ambiguous_or_failed_evidence() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    for (command, text, expected) in [
+        ("pytest", "$ pytest\n7 passed in 0.10s\n", "confirmed"),
+        (
+            "pytest",
+            "$ pytest\n1 failed, 7 passed in 0.10s\n",
+            "contradicted",
+        ),
+        ("jest", "$ jest\nTests: 7 passed, 7 total\n", "confirmed"),
+        (
+            "vitest run",
+            "$ vitest run\nTests 7 passed (7)\n",
+            "confirmed",
+        ),
+        (
+            "cargo test",
+            "$ cargo test\ntest result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+            "contradicted",
+        ),
+        (
+            "cargo test",
+            "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+            "not checkable",
+        ),
+        ("pytest", "$ other\n7 passed in 0.10s\n", "not checkable"),
+        (
+            "pytest",
+            "$ pytest\n7 passed in 0.10s\n$ pytest\n7 passed in 0.10s\n",
+            "not checkable",
+        ),
+        ("pytest", "$ pytest\ncollecting ...\n", "not checkable"),
+    ] {
+        fs::write(log.path(), text).unwrap();
+        let flag = format!("{command}={}", log.path().display());
+        let output = repository.check_with(
+            &format!("Ran `{command}`, 7 passed\n"),
+            &["--log", &flag],
+            &[],
+        );
+        assert_verdict(&output, 1, "test counts in supplied log", expected);
+    }
+    for flag in ["bad".to_owned(), "pytest=/nonexistent/log.txt".to_owned()] {
+        let output = repository.check_with("", &["--log", &flag], &[]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn pushed_statements_compare_named_commits_with_a_local_tracking_ref() {
+    let repository = Repository::new();
+    repository.write("README.md", "first\n");
+    let first = repository.commit();
+    repository.git(&["update-ref", "refs/remotes/origin/main", &first]);
+    repository.write("README.md", "second\n");
+    let second = repository.commit();
+    let args = ["--remote-ref", "refs/remotes/origin/main"];
+    let output = repository.check_with("Not pushed\nPushed\n", &args, &[]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_verdict(&output, 1, "local tracking ref ancestry", "confirmed");
+    assert_verdict(&output, 2, "local tracking ref ancestry", "contradicted");
+    let output = repository.check_with(
+        &format!("Commit {first} exists\nPushed\nNot pushed {second}\nPushed {second}\n"),
+        &args,
+        &[],
+    );
+    assert_verdict(&output, 2, "local tracking ref ancestry", "confirmed");
+    assert_verdict(&output, 3, "local tracking ref ancestry", "confirmed");
+    assert_verdict(&output, 4, "local tracking ref ancestry", "contradicted");
+    assert!(stdout(&output).contains("local snapshot"));
+    for args in [vec![], vec!["--remote-ref", "refs/remotes/missing/main"]] {
+        let output = repository.check_with("Not pushed\n", &args, &[]);
+        assert_eq!(output.status.code(), Some(3));
+        assert_verdict(&output, 1, "local tracking ref ancestry", "not checkable");
+    }
+}
+
+#[test]
+fn scope_statements_check_every_path_in_the_committed_diff() {
+    let repository = Repository::new();
+    repository.write("src/a.rs", "first\n");
+    repository.write("keep.txt", "keep\n");
+    let base = repository.commit();
+    repository.write("src/a.rs", "second\n");
+    repository.write("notes/a b.txt", "new\n");
+    repository.commit();
+    let output = repository.check_with("Only touched src/a.rs\nOnly touched src/a.rs, `notes/a b.txt`\nDid not modify keep.txt\nDid not modify src/a.rs\n", &["--base", &base], &[]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    for (line, verdict) in [
+        (1, "contradicted"),
+        (2, "confirmed"),
+        (3, "confirmed"),
+        (4, "contradicted"),
+    ] {
+        assert_verdict(&output, line, "committed diff scope", verdict);
+    }
+    let output = repository.check("Only touched src/a.rs\nDid not modify keep.txt\n");
+    assert_eq!(output.status.code(), Some(3));
+    for line in [1, 2] {
+        assert_verdict(&output, line, "committed diff scope", "not checkable");
+    }
+    let output = repository.check_with(
+        "Did not modify keep.txt\n",
+        &["--base", "0000000000000000000000000000000000000000"],
+        &[],
+    );
+    assert_verdict(&output, 1, "committed diff scope", "not checkable");
+}
+
+#[test]
+fn path_actions_require_the_matching_diff_status() {
+    let repository = Repository::new();
+    repository.write("gone.txt", "delete\n");
+    repository.write("old name.txt", "rename this file with unchanged content\n");
+    repository.write("modified.txt", "before\n");
+    let base = repository.commit();
+    repository.git(&["rm", "gone.txt"]);
+    repository.git(&["mv", "old name.txt", "new name.txt"]);
+    repository.write("added.txt", "add\n");
+    repository.write("modified.txt", "after\n");
+    repository.commit();
+    let output = repository.check_with("Added added.txt\nCreated added.txt\nDeleted gone.txt\nRenamed `new name.txt`\nRenamed `old name.txt` to `new name.txt`\nAdded modified.txt\nCreated gone.txt\nDeleted added.txt\nRenamed added.txt\nDid not modify `old name.txt`\nOnly touched added.txt, gone.txt, modified.txt, `new name.txt`\n", &["--base", &base], &[]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    for line in 1..=9 {
+        assert_verdict(
+            &output,
+            line,
+            "committed path action",
+            if line <= 5 {
+                "confirmed"
+            } else {
+                "contradicted"
+            },
+        );
+    }
+    for line in [10, 11] {
+        assert_verdict(&output, line, "committed diff scope", "contradicted");
+    }
+    let output = repository
+        .check("Added added.txt\nCreated added.txt\nDeleted gone.txt\nRenamed `new name.txt`\n");
+    assert_eq!(output.status.code(), Some(3));
+    for line in 1..=4 {
+        assert_verdict(&output, line, "committed path action", "not checkable");
+    }
+}
+
+#[test]
+fn json_output_preserves_verdicts_summary_and_exit_codes() {
+    let repository = Repository::new();
+    repository.write("README.md", "fixture\n");
+    repository.commit();
+    for (report, code, confirmed, contradicted, unknown) in [
+        ("File README.md exists\n", 0, 1, 0, 0),
+        ("File missing.txt exists\nUnknown\n", 1, 0, 1, 1),
+        ("Unknown\n", 3, 0, 0, 1),
+        ("", 3, 0, 0, 0),
+    ] {
+        let output = repository.check_with(report, &["--json"], &[]);
+        assert_eq!(output.status.code(), Some(code), "{output:?}");
+        let text = stdout(&output);
+        assert!(text.starts_with("{\"schema_version\":1,"), "{text}");
+        assert!(text.contains(&format!("\"confirmed\":{confirmed},\"contradicted\":{contradicted},\"not_checkable\":{unknown}")), "{text}");
+        assert!(text.contains(&format!("\"exit_code\":{code}")), "{text}");
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["exit_code"], code);
+        assert_eq!(
+            value["statements"].as_array().unwrap().len(),
+            (confirmed + contradicted + unknown) as usize
+        );
+        if !report.is_empty() {
+            assert_eq!(value["statements"][0]["line"], 1);
+            assert_eq!(
+                value["statements"][0]["statement"],
+                report.lines().next().unwrap()
+            );
+            assert!(value["statements"][0]["evidence"].as_str().is_some());
+        }
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn logs_cannot_hide_runner_failures_or_unfinished_suites() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    for (command, text, expected) in [
+        (
+            "cargo test",
+            "$ cargo test\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\nrunning 2 tests\n",
+            "not checkable",
+        ),
+        (
+            "cargo test",
+            "$ cargo test\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\nerror: test failed, to rerun pass --test other\n",
+            "contradicted",
+        ),
+        (
+            "jest",
+            "$ jest\nTest Suites: 1 failed, 1 passed, 2 total\nTests: 7 passed, 7 total\n",
+            "contradicted",
+        ),
+        (
+            "vitest run",
+            "$ vitest run\nTest Files 1 failed | 1 passed (2)\nTests 7 passed (7)\n",
+            "contradicted",
+        ),
+    ] {
+        fs::write(log.path(), text).unwrap();
+        let output = repository.check_with(
+            &format!("Ran `{command}`, 7 passed\n"),
+            &["--log", &format!("{command}={}", log.path().display())],
+            &[],
+        );
+        assert_verdict(&output, 1, "test counts in supplied log", expected);
+    }
+}
+
+#[test]
+fn diff_scope_is_root_relative_even_with_relative_diff_configuration() {
+    let repository = Repository::new();
+    repository.write("src/a.rs", "before\n");
+    repository.write("outside.txt", "before\n");
+    let base = repository.commit();
+    repository.write("src/a.rs", "after\n");
+    repository.write("outside.txt", "after\n");
+    repository.commit();
+    repository.git(&["config", "diff.relative", "true"]);
+    let report = tempfile::NamedTempFile::new().unwrap();
+    fs::write(
+        report.path(),
+        "Only touched src/a.rs\nDid not modify outside.txt\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-receipts"))
+        .arg("--repo")
+        .arg(repository.path().join("src"))
+        .args(["--base", &base, "--report", report.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    for line in [1, 2] {
+        assert_verdict(&output, line, "committed diff scope", "contradicted");
+    }
+}
