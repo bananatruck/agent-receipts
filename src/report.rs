@@ -164,6 +164,23 @@ fn argument(value: &str) -> Option<&str> {
     }
 }
 
+fn rename_arguments(value: &str) -> Option<(&str, &str)> {
+    let mut quoted = false;
+    for (index, c) in value.char_indices() {
+        if c == '`' {
+            quoted = !quoted;
+        }
+        if !quoted
+            && value
+                .get(index..index + 4)
+                .is_some_and(|s| s.eq_ignore_ascii_case(" to "))
+        {
+            return Some((&value[..index], &value[index + 4..]));
+        }
+    }
+    None
+}
+
 fn parse_claim(content: &str) -> Claim {
     if let Some(c) = ACTION.captures(content) {
         let action = match c[1].to_ascii_lowercase().as_str() {
@@ -172,7 +189,7 @@ fn parse_claim(content: &str) -> Claim {
             "renamed" => {
                 if let Some(to) = path_argument(&c[2]) {
                     Some(PathAction::Renamed { from: None, to })
-                } else if let Some((from, to)) = c[2].split_once(" to ") {
+                } else if let Some((from, to)) = rename_arguments(&c[2]) {
                     path_argument(from)
                         .zip(path_argument(to))
                         .map(|(from, to)| PathAction::Renamed {

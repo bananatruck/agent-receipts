@@ -1039,3 +1039,20 @@ fn file_presence_does_not_resolve_intermediate_symlinks() {
     assert_verdict(&output, 1, "file at HEAD", "contradicted");
     assert_verdict(&output, 2, "file at HEAD", "confirmed");
 }
+
+#[test]
+fn rename_separator_is_case_insensitive_and_outside_path_quotes() {
+    let repository = Repository::new();
+    repository.write("old to name.txt", "fixture\n");
+    let base = repository.commit();
+    repository.git(&["mv", "old to name.txt", "new name.txt"]);
+    repository.commit();
+    for report in [
+        "Renamed `old to name.txt` to `new name.txt`\n",
+        "RENAMED `old to name.txt` TO `new name.txt`\n",
+        "Renamed `new name.txt`\n",
+    ] {
+        let output = repository.check_with(report, &["--base", &base], &[]);
+        assert_eq!(output.status.code(), Some(0), "{report}: {output:?}");
+    }
+}
