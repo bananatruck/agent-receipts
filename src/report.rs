@@ -19,7 +19,12 @@ static PUSHED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(not pushed|did not push|pushed)(?: (`?[0-9a-f]{7,64}`?))?$").unwrap()
 });
 
+static SCOPE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^(only touched|did not modify) (.+)$").unwrap());
+
 pub enum Claim {
+    OnlyTouched(Vec<String>),
+    DidNotModify(String),
     Pushed {
         pushed: bool,
         commit: Option<String>,
@@ -38,6 +43,7 @@ pub enum Claim {
 impl Claim {
     pub fn label(&self) -> &'static str {
         match self {
+            Self::OnlyTouched(_) | Self::DidNotModify(_) => "committed diff scope",
             Self::Pushed { .. } => "local tracking ref ancestry",
             Self::Tests { .. } => "test counts in supplied log",
             Self::Commit(_) => "commit exists locally",
@@ -126,6 +132,18 @@ fn argument(value: &str) -> Option<&str> {
 }
 
 fn parse_claim(content: &str) -> Claim {
+    if let Some(c) = SCOPE.captures(content) {
+        if c[1].eq_ignore_ascii_case("did not modify") {
+            if let Some(path) = path_argument(&c[2]) {
+                return Claim::DidNotModify(path);
+            }
+        } else if let Some(paths) = path_list(&c[2]) {
+            return Claim::OnlyTouched(paths);
+        }
+        return Claim::Unsupported(
+            "expected literal repository-relative paths, separated by comma and space".into(),
+        );
+    }
     if let Some(c) = PUSHED.captures(content) {
         let commit = match c.get(2) {
             Some(value) => match argument(value.as_str()) {
@@ -185,4 +203,32 @@ fn parse_claim(content: &str) -> Claim {
         }
     }
     Claim::Unsupported("no supported assertion grammar; no evidence check performed".into())
+}
+
+fn path_argument(value: &str) -> Option<String> {
+    let path = argument(value)?;
+    (!path.contains([':', '\\'])
+        && !path.contains(char::is_control)
+        && path.split('/').all(|part| !matches!(part, "" | "." | "..")))
+    .then(|| path.to_owned())
+}
+
+fn path_list(value: &str) -> Option<Vec<String>> {
+    let mut quoted = false;
+    let mut start = 0;
+    let mut paths = Vec::new();
+    for (index, c) in value.char_indices() {
+        if c == '`' {
+            quoted = !quoted;
+        }
+        if c == ',' && !quoted {
+            paths.push(path_argument(&value[start..index])?);
+            if !value[index..].starts_with(", ") {
+                return None;
+            }
+            start = index + 2;
+        }
+    }
+    paths.push(path_argument(&value[start..])?);
+    Some(paths)
 }

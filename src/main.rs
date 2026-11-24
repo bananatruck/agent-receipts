@@ -25,6 +25,9 @@ struct Args {
     /// Existing local tracking ref, for example refs/remotes/origin/main
     #[arg(long)]
     remote_ref: Option<String>,
+    /// Base commit for the committed diff ending at HEAD
+    #[arg(long)]
+    base: Option<String>,
     /// UTF-8 report file, or - for stdin
     #[arg(long, default_value = "-")]
     report: PathBuf,
@@ -85,6 +88,9 @@ fn run(args: Args) -> Result<u8, String> {
                 &named_commits,
                 args.remote_ref.as_deref(),
             ),
+            report::Claim::OnlyTouched(_) | report::Claim::DidNotModify(_) => {
+                repository.verify_diff(&statement.claim, args.base.as_deref())
+            }
             _ => repository.verify(&statement.claim),
         };
         match finding.verdict {

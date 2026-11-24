@@ -24,6 +24,11 @@ pub struct Finding {
     pub evidence: String,
 }
 
+struct Change {
+    status: String,
+    paths: Vec<String>,
+}
+
 pub struct Repository {
     path: PathBuf,
 }
@@ -64,6 +69,7 @@ impl Repository {
             Claim::Commit(hash) => self.commit(hash),
             Claim::File(path) => self.file(path),
             Claim::CleanTree => self.clean_tree(),
+            Claim::OnlyTouched(_) | Claim::DidNotModify(_) => Err("no base commit evidence".into()),
             Claim::Pushed { .. } => Err("no tracking ref evidence".into()),
             Claim::Tests { .. } => Err("no supplied log".into()),
             Claim::Unsupported(reason) => Ok(Finding {
@@ -71,6 +77,70 @@ impl Repository {
                 evidence: reason.to_owned(),
             }),
         };
+        result.unwrap_or_else(|evidence| Finding {
+            verdict: Verdict::NotCheckable,
+            evidence,
+        })
+    }
+
+    fn changes(&self, base: Option<&str>) -> Result<(String, String, Vec<Change>), String> {
+        let base = base.ok_or("supply --base COMMIT to inspect the committed diff through HEAD")?;
+        let base = successful_text(self.git(&[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{base}^{{commit}}"),
+        ])?)?
+        .trim()
+        .to_owned();
+        let head = successful_text(self.git(&["rev-parse", "--verify", "HEAD^{commit}"])?)?
+            .trim()
+            .to_owned();
+        let text = successful_text(self.git(&[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=none",
+            "--name-status",
+            "-z",
+            "--find-renames=50%",
+            &base,
+            &head,
+            "--",
+        ])?)?;
+        let mut fields = text.split_terminator('\0');
+        let mut changes = Vec::new();
+        while let Some(status) = fields.next() {
+            let count = if status.starts_with(['R', 'C']) { 2 } else { 1 };
+            let paths: Vec<_> = (0..count)
+                .map(|_| {
+                    fields
+                        .next()
+                        .map(str::to_owned)
+                        .ok_or("incomplete diff record")
+                })
+                .collect::<Result<_, _>>()?;
+            changes.push(Change {
+                status: status.to_owned(),
+                paths,
+            });
+        }
+        Ok((base, head, changes))
+    }
+
+    pub fn verify_diff(&self, claim: &Claim, base: Option<&str>) -> Finding {
+        let result = self.changes(base).map(|(base, head, changes)| {
+            let paths: Vec<_> = changes.iter().flat_map(|change| change.paths.iter()).collect();
+            let matches = match claim {
+                Claim::OnlyTouched(allowed) => paths.iter().all(|p| allowed.contains(p)),
+                Claim::DidNotModify(path) => !paths.contains(&path),
+                _ => unreachable!("diff claims only"),
+            };
+            Finding {
+                verdict: if matches { Verdict::Confirmed } else { Verdict::Contradicted },
+                evidence: format!("committed diff {base}..{head}: {}; excludes working-tree changes and intermediate edits", changes.iter().map(|c| format!("{} {}", c.status, c.paths.join(" -> "))).collect::<Vec<_>>().join("; ")),
+            }
+        });
         result.unwrap_or_else(|evidence| Finding {
             verdict: Verdict::NotCheckable,
             evidence,

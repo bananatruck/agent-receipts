@@ -523,3 +523,35 @@ fn pushed_statements_compare_named_commits_with_a_local_tracking_ref() {
         assert_verdict(&output, 1, "local tracking ref ancestry", "not checkable");
     }
 }
+
+#[test]
+fn scope_statements_check_every_path_in_the_committed_diff() {
+    let repository = Repository::new();
+    repository.write("src/a.rs", "first\n");
+    repository.write("keep.txt", "keep\n");
+    let base = repository.commit();
+    repository.write("src/a.rs", "second\n");
+    repository.write("notes/a b.txt", "new\n");
+    repository.commit();
+    let output = repository.check_with("Only touched src/a.rs\nOnly touched src/a.rs, `notes/a b.txt`\nDid not modify keep.txt\nDid not modify src/a.rs\n", &["--base", &base], &[]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    for (line, verdict) in [
+        (1, "contradicted"),
+        (2, "confirmed"),
+        (3, "confirmed"),
+        (4, "contradicted"),
+    ] {
+        assert_verdict(&output, line, "committed diff scope", verdict);
+    }
+    let output = repository.check("Only touched src/a.rs\nDid not modify keep.txt\n");
+    assert_eq!(output.status.code(), Some(3));
+    for line in [1, 2] {
+        assert_verdict(&output, line, "committed diff scope", "not checkable");
+    }
+    let output = repository.check_with(
+        "Did not modify keep.txt\n",
+        &["--base", "0000000000000000000000000000000000000000"],
+        &[],
+    );
+    assert_verdict(&output, 1, "committed diff scope", "not checkable");
+}
