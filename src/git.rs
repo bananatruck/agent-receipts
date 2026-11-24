@@ -49,10 +49,24 @@ impl Repository {
 
     fn git(&self, args: &[&str]) -> Result<Output, String> {
         Command::new("git")
-            .args(["--no-optional-locks", "-c", "core.fsmonitor=false", "-C"])
+            .args([
+                "--no-optional-locks",
+                "--no-replace-objects",
+                "--literal-pathspecs",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-C",
+            ])
             .arg(&self.path)
             .args(args)
             .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_COUNT", "0")
+            .env_remove("GIT_CONFIG_PARAMETERS")
+            .env_remove("GIT_REPLACE_REF_BASE")
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
@@ -331,6 +345,16 @@ impl Repository {
     }
 
     fn clean_tree(&self) -> Result<Finding, String> {
+        let entries = successful_text(self.git(&["ls-files", "-v", "-z"])?)?;
+        if entries.split_terminator('\0').any(|entry| {
+            entry
+                .as_bytes()
+                .first()
+                .is_some_and(|tag| tag.is_ascii_lowercase() || *tag == b'S')
+        }) {
+            return Err("index has assume-unchanged or skip-worktree entries; working-tree cleanliness is not checkable".into());
+        }
+
         let output = self.git(&[
             "status",
             "--porcelain=v1",

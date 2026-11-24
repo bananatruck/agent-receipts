@@ -876,3 +876,31 @@ fn markdown_code_context_cannot_become_an_assertion() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn repository_overlays_cannot_hide_missing_evidence_or_dirty_files() {
+    let mut failures = Vec::new();
+    for flag in ["--assume-unchanged", "--skip-worktree"] {
+        let repository = Repository::new();
+        repository.write("a.txt", "before\n");
+        repository.commit();
+        repository.git(&["update-index", flag, "a.txt"]);
+        repository.write("a.txt", "after\n");
+        let output = repository.check("Tree is clean\n");
+        if stdout(&output).contains("\tconfirmed\t") {
+            failures.push(format!("{flag}: {}", stdout(&output)));
+        }
+    }
+    let repository = Repository::new();
+    repository.write("a.txt", "before\n");
+    let first = repository.commit();
+    repository.write("new.txt", "new\n");
+    let second = repository.commit();
+    repository.git(&["checkout", "--detach", &first]);
+    repository.git(&["replace", &first, &second]);
+    let output = repository.check("File new.txt exists\n");
+    if !stdout(&output).contains("\tcontradicted\t") {
+        failures.push(stdout(&output));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
