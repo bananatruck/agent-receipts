@@ -1010,3 +1010,32 @@ fn matching_failure_counts_are_valid_evidence_and_stdout_is_not_runner_status() 
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn additions_and_deletions_check_endpoints_despite_rename_similarity() {
+    let repository = Repository::new();
+    repository.write("old.rs", "same content\n");
+    let base = repository.commit();
+    repository.git(&["mv", "old.rs", "new.rs"]);
+    repository.commit();
+    let output = repository.check_with(
+        "Added new.rs\nCreated new.rs\nDeleted old.rs\nRenamed old.rs to new.rs\n",
+        &["--base", &base],
+        &[],
+    );
+    for line in 1..=4 {
+        assert_verdict(&output, line, "committed path action", "confirmed");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn file_presence_does_not_resolve_intermediate_symlinks() {
+    let repository = Repository::new();
+    repository.write("sub/file.txt", "fixture\n");
+    std::os::unix::fs::symlink("sub", repository.path().join("dir_link")).unwrap();
+    repository.commit();
+    let output = repository.check("File dir_link/file.txt exists\nFile sub/file.txt exists\n");
+    assert_verdict(&output, 1, "file at HEAD", "contradicted");
+    assert_verdict(&output, 2, "file at HEAD", "confirmed");
+}

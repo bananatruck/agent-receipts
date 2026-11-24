@@ -183,8 +183,8 @@ impl Repository {
                 DiffClaim::OnlyTouched(allowed) => paths.iter().all(|p| allowed.contains(p)),
                 DiffClaim::DidNotModify(path) => !paths.contains(&path),
                 DiffClaim::Action(action) => changes.iter().any(|change| match action {
-                    PathAction::Added(path) => change.status == "A" && change.paths.first() == Some(path),
-                    PathAction::Deleted(path) => change.status == "D" && change.paths.first() == Some(path),
+                    PathAction::Added(path) => (change.status == "A" || change.status.starts_with('R')) && change.paths.last() == Some(path),
+                    PathAction::Deleted(path) => (change.status == "D" || change.status.starts_with('R')) && change.paths.first() == Some(path),
                     PathAction::Renamed { from, to } => change.status.starts_with('R') && change.paths.last() == Some(to) && from.as_ref().is_none_or(|from| change.paths.first() == Some(from)),
                 }),
             };
