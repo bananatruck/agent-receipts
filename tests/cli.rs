@@ -856,3 +856,23 @@ fn logs_require_anchored_records_complete_suites_and_no_runner_errors() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn markdown_code_context_cannot_become_an_assertion() {
+    let repository = Repository::new();
+    repository.write("a.txt", "fixture\n");
+    repository.commit();
+    let mut failures = Vec::new();
+    for report in [
+        "```\n    ```\nTree is clean\n```\n",
+        " \tTree is clean\n",
+        "-     Tree is clean\n",
+        "- ```\n  Tree is clean\n  ```\n",
+    ] {
+        let output = repository.check(report);
+        if output.status.code() != Some(3) || stdout(&output).contains("\tconfirmed\t") {
+            failures.push(format!("{report:?}: {}", stdout(&output)));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

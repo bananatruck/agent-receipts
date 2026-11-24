@@ -80,29 +80,45 @@ pub fn parse(text: &str) -> Vec<Statement> {
         .enumerate()
         .filter_map(|(index, raw)| {
             let source = raw.trim();
-            if let Some((marker, length)) = fence_marker(source) {
-                match fence {
-                    None => {
-                        fence = Some((marker, length));
-                        return None;
+            let indented = indentation(raw) >= 4;
+            let content = PREFIX.replace(source, "");
+            let list_code = content.len() != source.len()
+                && source[..source.len() - content.len()]
+                    .chars()
+                    .rev()
+                    .take_while(|c| c.is_whitespace())
+                    .count()
+                    >= 5;
+            let delimiter = if fence.is_none() {
+                content.as_ref()
+            } else {
+                source
+            };
+            if !indented && !list_code {
+                if let Some((marker, length)) = fence_marker(delimiter) {
+                    match fence {
+                        None => {
+                            fence = Some((marker, length));
+                            return None;
+                        }
+                        Some((opening, minimum))
+                            if marker == opening
+                                && length >= minimum
+                                && delimiter[length..].trim().is_empty() =>
+                        {
+                            fence = None;
+                            return None;
+                        }
+                        _ => {}
                     }
-                    Some((opening, minimum))
-                        if marker == opening
-                            && length >= minimum
-                            && source[length..].trim().is_empty() =>
-                    {
-                        fence = None;
-                        return None;
-                    }
-                    _ => {}
                 }
             }
-            if source.is_empty() || (fence.is_none() && is_heading(source)) {
+            if source.is_empty() {
                 return None;
             }
             let content = PREFIX.replace(source, "");
             let content = content.strip_suffix('.').unwrap_or(&content);
-            let claim = if fence.is_some() || raw.starts_with("    ") || raw.starts_with('\t') {
+            let claim = if fence.is_some() || indented || list_code {
                 Claim::Unsupported(
                     "quoted code is not an assertion; no evidence check performed".into(),
                 )
@@ -116,6 +132,18 @@ pub fn parse(text: &str) -> Vec<Statement> {
             })
         })
         .collect()
+}
+
+fn indentation(line: &str) -> usize {
+    line.chars()
+        .take_while(|c| matches!(c, ' ' | '\t'))
+        .fold(0, |column, c| {
+            if c == '\t' {
+                column + 4 - column % 4
+            } else {
+                column + 1
+            }
+        })
 }
 
 fn fence_marker(line: &str) -> Option<(char, usize)> {
