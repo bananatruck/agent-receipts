@@ -1160,3 +1160,31 @@ fn list_code_indentation_counts_tab_columns() {
     let output = repository.check("- \t\tTree is clean\n");
     assert_eq!(output.status.code(), Some(3), "{output:?}");
 }
+
+#[cfg(unix)]
+#[test]
+fn pushed_hashes_reject_prefix_collisions_across_object_types() {
+    let repository = Repository::new();
+    repository.git(&["hash-object", "-w", "-t", "tree", "/dev/null"]);
+    repository.write("commit-input", "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nPrefix fixture 10484\n");
+    let commit = repository.git(&["hash-object", "-w", "-t", "commit", "commit-input"]);
+    repository.write("blob-input", "prefix fixture blob 34141\n");
+    let blob = repository.git(&["hash-object", "-w", "blob-input"]);
+    assert_eq!(&commit[..7], "b01b666");
+    assert_eq!(&blob[..7], "b01b666");
+    repository.git(&["update-ref", "refs/remotes/origin/main", &commit]);
+    let output = repository.check_with(
+        "Pushed b01b666\nNot pushed b01b666\n",
+        &["--remote-ref", "refs/remotes/origin/main"],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    for line in 1..=2 {
+        assert_verdict(
+            &output,
+            line,
+            "local tracking ref ancestry",
+            "not checkable",
+        );
+    }
+}
