@@ -1,66 +1,167 @@
 # agent-receipts
 
-Check a coding report against a local Git repository and see the evidence for each verdict.
-This walking skeleton checks commit existence, file presence at HEAD, and whether the working tree is clean.
-It uses fixed statement rules and runs offline.
+Check a coding report against local Git evidence and supplied command logs.
+Each statement gets confirmed, contradicted, or not checkable, with the evidence shown.
+The executable runs offline and never executes report text.
 
 ## Run a check
 
 Install stable Rust and Git, then build the executable.
+The lock below limits heavy work on a shared machine.
 
 ```sh
-CARGO_BUILD_JOBS=2 cargo build --locked --release
+mkdir -p ~/overnight-2026-11-17/logs
+CARGO_BUILD_JOBS=2 flock -w 1800 ~/overnight-2026-11-17/logs/heavy.lock cargo build --locked --release
 ./target/release/agent-receipts --repo . --report examples/synthetic-report.md
 printf 'Tree is clean\n' | ./target/release/agent-receipts --repo .
 ./target/release/agent-receipts --help
 ```
 
 `--report -` reads stdin and is the default.
-The sample report is synthetic and intentionally includes missing evidence and false statements.
-Results depend on the checked repository, so an uncommitted checkout cannot confirm file presence at HEAD.
-
 Use one statement per line, optionally with a Markdown bullet and a final period.
+Headings and blank lines are ignored.
+Quoted code and unsupported wording stay not checkable.
 
 ```text
-Committed as <real commit hash>
+Commit <hash> exists
 File src/main.rs exists
-Added `path with spaces.txt`
 Tree is clean
+Ran `cargo test`, 77 passed
+Pushed
+Not pushed <hash>
+Only touched src/main.rs, `notes/a b.txt`
+Did not modify LICENSE
+Added src/new.rs
+Created src/new.rs
+Deleted src/old.rs
+Renamed src/new-name.rs
+Renamed src/old-name.rs to src/new-name.rs
 ```
 
-The output is a tab-separated table with source line numbers, the check performed, a verdict, and evidence.
-Exit codes are 0 for all confirmed, 1 for any contradiction, 2 for input or repository errors, and 3 for missing evidence.
-An empty report exits 3.
+Paths are literal repository-root-relative entries, with backticks required for spaces.
+Directory prefixes and globs do not match groups of files.
+`File path exists` checks for a blob at HEAD.
+`Added` and `Created` require addition status in the committed diff, rather than file presence alone.
 
-## Run the synthetic demo
+## Supply evidence
 
-After building, run the demo against its own temporary repository.
-It checks successful claims, introduces an untracked file, and shows a missing file and an unsupported test claim.
-The script checks its expected exit codes and removes its temporary repository when it finishes.
+Use `--base COMMIT` for path scope and action checks.
+The diff compares that commit's tree with HEAD's tree and excludes working-tree changes and intermediate edits later undone.
+Both endpoints of a rename count as touched paths.
+Git's 50 percent similarity threshold determines rename status.
+
+Use `--remote-ref refs/remotes/origin/main` for pushed-state checks against an existing local tracking ref.
+Bare statements check all hashes named in supported commit-existence statements in the report, or HEAD if none are named.
+An explicit hash on a pushed-state statement selects only that commit.
+All selected commits must satisfy the asserted ancestry relation.
+The evidence is a local snapshot that may be stale; it does not prove the server's present state or push history.
+No fetch or other network request occurs.
+
+Use repeatable `--log 'COMMAND=PATH'` flags for captured UTF-8 command logs.
+Each log must contain exactly one `$ COMMAND` record on its own line, followed by the captured output.
+The record, flag, and report must use exactly the same command, including its flags and spaces.
+The supported families are `cargo test`, `pytest`, `vitest`, `jest`, `npx vitest`, and `npx jest`, with optional arguments.
+Use plain output without ANSI color codes.
+The cargo parser combines completed suite summaries; the other parsers require one unambiguous final test summary.
+Failures contradict test-success statements, even when the passed count matches.
+The output states that a supplied log is evidence only of its contents, not authentic execution in this checkout.
+
+This captures a real run with the required command record.
+The status check prevents a failed test command from being hidden by a later successful shell command.
 
 ```sh
-sh examples/demo.sh
+capture=$(mktemp)
+printf '$ cargo test --locked --all-targets\n' > "$capture"
+CARGO_BUILD_JOBS=2 flock -w 1800 ~/overnight-2026-11-17/logs/heavy.lock cargo test --locked --all-targets >> "$capture" 2>&1
+result=$?
+cat "$capture"
+[ "$result" -eq 0 ] || exit "$result"
+./target/release/agent-receipts --repo . --base 670dafc \
+  --report examples/synthetic-history-report.md \
+  --log "cargo test --locked --all-targets=$capture"
 ```
 
-## Limits
+The synthetic history report deliberately contains false statements, so this last command exits 1.
+Keep the capture file if you want to inspect its evidence, then remove it when finished.
+A bare count such as `77 tests passed` lacks a command and stays not checkable.
 
-`Added path` checks only whether a file blob exists at HEAD.
-It does not prove a new addition, authorship, or a change since a base commit.
-A clean-tree check includes staged, unstaged, and untracked changes, and excludes ignored files.
-Quoted code and unsupported wording receive `not checkable` verdicts.
-The tool does not execute report commands or check test counts, captured logs, remote refs, or push history in this phase.
-It cannot prove when tests ran or whether supplied evidence is authentic.
+## Real history example
 
-See [SPEC.md](SPEC.md) for the exact grammar, evidence limits, planned log and remote checks, test plan, and two-minute demo script.
+The input in [examples/synthetic-history-report.md](examples/synthetic-history-report.md) is synthetic.
+The repository history and the test output used to check it are real.
+The run below was captured with HEAD at `99b79ea` and base `670dafc`, before this documentation commit.
+The captured test run reported 3 parser tests and 26 CLI tests passed, with no failures.
+Re-running after later commits can change the endpoint hash and diff records, and adding tests can change the count verdicts.
 
-## Check the source
+```text
+LINE	STATEMENT	CHECK	VERDICT	EVIDENCE
+3	Commit 99b79ea exists	commit exists locally	confirmed	local object 99b79ea40adf59eb3a60466c89237d8787c2b5fd has type commit
+4	File src/missing.rs exists	file at HEAD	contradicted	no file entry at HEAD:src/missing.rs
+5	Added src/logs.rs	committed path action	confirmed	committed diff 670dafc0136bcf3dd3f1e0443bd34619ed88945e..99b79ea40adf59eb3a60466c89237d8787c2b5fd: M Cargo.lock; M Cargo.toml; M src/git.rs; A src/logs.rs; M src/main.rs; M src/report.rs; M tests/cli.rs; excludes working-tree changes and intermediate edits
+6	Did not modify LICENSE	committed diff scope	confirmed	committed diff 670dafc0136bcf3dd3f1e0443bd34619ed88945e..99b79ea40adf59eb3a60466c89237d8787c2b5fd: M Cargo.lock; M Cargo.toml; M src/git.rs; A src/logs.rs; M src/main.rs; M src/report.rs; M tests/cli.rs; excludes working-tree changes and intermediate edits
+7	Ran `cargo test --locked --all-targets`, 29 passed	test counts in supplied log	confirmed	cargo test --locked --all-targets: 29 passed, 0 failed; evidence covers only what the supplied log contains, not execution or authenticity
+8	Ran `cargo test --locked --all-targets`, 30 passed	test counts in supplied log	contradicted	cargo test --locked --all-targets: 29 passed, 0 failed; evidence covers only what the supplied log contains, not execution or authenticity
+9	Not pushed	local tracking ref ancestry	not checkable	supply --remote-ref refs/remotes/NAME/BRANCH; no network is used
+Summary: 4 confirmed, 2 contradicted, 1 not checkable
+Exit: 1
+```
+
+The missing file and the count of 30 are contradicted.
+The addition and LICENSE exclusion match the committed diff.
+`Not pushed` stays not checkable because this run supplies no tracking ref.
+The full table is also saved in [examples/history-output.tsv](examples/history-output.tsv).
+
+## JSON schema
+
+Add `--json` to emit one JSON object followed by a newline, without a table or extra stdout text.
+Operational errors still go to stderr and exit 2 without a results document.
+Schema version 1 has these required fields.
+JSON object key order is not part of the contract.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `schema_version` | integer | Always `1` for this schema |
+| `statements` | array | Results in source order, empty for an empty report |
+| `statements[].line` | positive integer | Original one-based source line |
+| `statements[].statement` | string | Trimmed source line, including its bullet if present |
+| `statements[].check` | string | Check label, such as `file at HEAD` or `committed diff scope` |
+| `statements[].verdict` | string | `confirmed`, `contradicted`, or `not checkable` |
+| `statements[].evidence` | string | Human-readable observed evidence or reason it is unavailable |
+| `summary.confirmed` | nonnegative integer | Confirmed statement count |
+| `summary.contradicted` | nonnegative integer | Contradicted statement count |
+| `summary.not_checkable` | nonnegative integer | Uncheckable statement count |
+| `exit_code` | integer | Same CI code returned by the process |
+
+Source and evidence strings use JSON escaping rather than the table's visible cell escaping.
+Evidence prose is explanatory text, not a machine-parseable sub-schema.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | At least one statement and all confirmed |
+| 1 | Any contradiction, including reports with missing evidence too |
+| 2 | Invalid invocation, unreadable input, unavailable Git, or invalid working repository |
+| 3 | No contradiction, but some missing evidence or no statements |
+
+## Check and demo
 
 ```sh
 cargo fmt --all -- --check
-CARGO_BUILD_JOBS=2 cargo clippy --locked --all-targets -- -D warnings
-CARGO_BUILD_JOBS=2 cargo test --locked --all-targets
-CARGO_BUILD_JOBS=2 cargo build --locked --release
+CARGO_BUILD_JOBS=2 flock -w 1800 ~/overnight-2026-11-17/logs/heavy.lock cargo clippy --locked --all-targets -- -D warnings
+CARGO_BUILD_JOBS=2 flock -w 1800 ~/overnight-2026-11-17/logs/heavy.lock cargo test --locked --all-targets
+CARGO_BUILD_JOBS=2 flock -w 1800 ~/overnight-2026-11-17/logs/heavy.lock cargo build --locked --release
+sh examples/demo.sh
 ```
 
 Tests create isolated repositories under the system temp directory.
+The runnable demo changes a throwaway repository and checks the expected exit codes.
+See [SPEC.md](SPEC.md) for exact grammar and evidence limits, [submission/DEVPOST.md](submission/DEVPOST.md) for the submission draft, and [submission/demo-script.md](submission/demo-script.md) for the video plan.
+
+## Limits
+
+The program uses fixed grammar rather than arbitrary natural-language interpretation.
+It cannot prove code quality, intent, authorship, report completeness, evidence authenticity, or when tests ran.
+An endpoint diff cannot reveal every path edited during a session.
+A clean-tree check excludes ignored files and describes only its observation time.
+Some truncation between completed test suites is indistinguishable from a shorter complete log.
+Repository evidence is not atomic if another process changes it during verification.
 The [MIT license](LICENSE) applies.
