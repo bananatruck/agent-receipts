@@ -904,3 +904,37 @@ fn repository_overlays_cannot_hide_missing_evidence_or_dirty_files() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn cleanliness_never_executes_configured_filters() {
+    let repository = Repository::new();
+    repository.write(".gitattributes", "a.txt filter=probe\n");
+    repository.write("a.txt", "before\n");
+    repository.commit();
+    let marker = repository.path().join("executed");
+    repository.git(&[
+        "config",
+        "filter.probe.clean",
+        &format!("touch '{}'; cat", marker.display()),
+    ]);
+    repository.write("a.txt", "changed and stat dirty\n");
+    let output = repository.check("Tree is clean\n");
+    assert!(!marker.exists(), "configured filter executed: {output:?}");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+}
+
+#[test]
+fn terminal_output_escapes_direction_and_format_controls() {
+    let repository = Repository::new();
+    let output = repository.check(
+        "File \u{202e}detcidartnoc\tconfirmed exists\n\u{2066}hidden\u{2069}\n\u{200b}zero\n",
+    );
+    for c in ['\u{202e}', '\u{2066}', '\u{2069}', '\u{200b}'] {
+        assert!(
+            !stdout(&output).contains(c),
+            "raw format control in {}",
+            stdout(&output)
+        );
+    }
+    assert!(stdout(&output).contains("\\u{202e}"));
+}

@@ -345,6 +345,28 @@ impl Repository {
     }
 
     fn clean_tree(&self) -> Result<Finding, String> {
+        let filters = self.git(&[
+            "config",
+            "--name-only",
+            "--get-regexp",
+            r"^filter\..*\.(clean|process)$",
+        ])?;
+        match filters.status.code() {
+            Some(1) => {}
+            Some(0) => {
+                return Err(
+                    "configured clean or process filters prevent a safe working-tree check".into(),
+                );
+            }
+            _ => return Err("cannot inspect repository filter configuration".into()),
+        }
+        let stages = successful_text(self.git(&["ls-files", "--stage", "-z"])?)?;
+        if stages
+            .split_terminator('\0')
+            .any(|entry| entry.starts_with("160000 "))
+        {
+            return Err("working-tree cleanliness inside submodules is not checkable".into());
+        }
         let entries = successful_text(self.git(&["ls-files", "-v", "-z"])?)?;
         if entries.split_terminator('\0').any(|entry| {
             entry
