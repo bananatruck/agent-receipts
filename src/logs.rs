@@ -52,18 +52,30 @@ impl Logs {
                     .split_once(&format!("$ {command}\n"))
                     .map(|(_, body)| body)
                     .ok_or("missing command output")?;
-                match command.split_whitespace().collect::<Vec<_>>().as_slice() {
-                    ["cargo", "test", ..] => cargo_summary(body),
-                    ["pytest", ..] => pytest_summary(body),
-                    ["vitest" | "jest", ..] | ["npx", "vitest" | "jest", ..] => {
-                        javascript_summary(body)
-                    }
-                    _ => None,
+                let parser: fn(&str) -> Option<Counts> =
+                    match command.split_whitespace().collect::<Vec<_>>().as_slice() {
+                        ["cargo", "test", ..] => cargo_summary,
+                        ["pytest", ..] => pytest_summary,
+                        ["vitest" | "jest", ..] | ["npx", "vitest" | "jest", ..] => {
+                            javascript_summary
+                        }
+                        _ => return Err("unsupported command family"),
+                    };
+                if runner_failure(body) {
+                    return Ok(None);
                 }
-                .ok_or("no unambiguous supported completed test summary")
+                parser(body)
+                    .map(Some)
+                    .ok_or("no unambiguous supported completed test summary")
             });
         match result {
-            Ok(counts) => Finding {
+            Ok(None) => Finding {
+                verdict: Verdict::Contradicted,
+                evidence: format!(
+                    "{command}: log records a runner failure; evidence covers only what the supplied log contains, not execution or authenticity"
+                ),
+            },
+            Ok(Some(counts)) => Finding {
                 verdict: if counts.passed == passed
                     && counts.failed == 0
                     && failed.is_none_or(|n| n == counts.failed)
@@ -73,7 +85,7 @@ impl Logs {
                     Verdict::Contradicted
                 },
                 evidence: format!(
-                    "{command}: {} passed, {} failed; confirms only what the supplied log contains, not execution or authenticity",
+                    "{command}: {} passed, {} failed; evidence covers only what the supplied log contains, not execution or authenticity",
                     counts.passed, counts.failed
                 ),
             },
@@ -94,7 +106,14 @@ pub fn cargo_summary(text: &str) -> Option<Counts> {
         failed: 0,
     };
     let mut found = false;
+    let mut pending = false;
     for line in text.lines().map(str::trim) {
+        if line.starts_with("running ") && (line.ends_with(" tests") || line.ends_with(" test")) {
+            pending = true;
+        }
+        if line.starts_with("Running ") || line.starts_with("Doc-tests ") {
+            pending = true;
+        }
         if !line.starts_with("test result:") {
             continue;
         }
@@ -102,8 +121,9 @@ pub fn cargo_summary(text: &str) -> Option<Counts> {
         total.passed = total.passed.checked_add(c[1].parse().ok()?)?;
         total.failed = total.failed.checked_add(c[2].parse().ok()?)?;
         found = true;
+        pending = false;
     }
-    found.then_some(total)
+    (found && !pending).then_some(total)
 }
 
 #[cfg(test)]
@@ -260,4 +280,11 @@ fn javascript_summary(text: &str) -> Option<Counts> {
         sum.checked_add(item.trim().split_once(' ')?.0.parse().ok()?)
     })?;
     (sum == total).then_some(counts)
+}
+
+fn runner_failure(text: &str) -> bool {
+    static FAILURE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?:error: (?:test failed|could not compile)|test result: FAILED\.|(?:Test Suites:|Test Files)\s+.*\b[1-9][0-9]* failed\b|FAIL(?:\s|$)|ERROR collecting )").unwrap()
+    });
+    text.lines().any(|line| FAILURE.is_match(line.trim()))
 }

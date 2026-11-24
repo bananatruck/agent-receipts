@@ -628,3 +628,39 @@ fn json_output_preserves_verdicts_summary_and_exit_codes() {
         assert!(output.stderr.is_empty());
     }
 }
+
+#[test]
+fn logs_cannot_hide_runner_failures_or_unfinished_suites() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    for (command, text, expected) in [
+        (
+            "cargo test",
+            "$ cargo test\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\nrunning 2 tests\n",
+            "not checkable",
+        ),
+        (
+            "cargo test",
+            "$ cargo test\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\nerror: test failed, to rerun pass --test other\n",
+            "contradicted",
+        ),
+        (
+            "jest",
+            "$ jest\nTest Suites: 1 failed, 1 passed, 2 total\nTests: 7 passed, 7 total\n",
+            "contradicted",
+        ),
+        (
+            "vitest run",
+            "$ vitest run\nTest Files 1 failed | 1 passed (2)\nTests 7 passed (7)\n",
+            "contradicted",
+        ),
+    ] {
+        fs::write(log.path(), text).unwrap();
+        let output = repository.check_with(
+            &format!("Ran `{command}`, 7 passed\n"),
+            &["--log", &format!("{command}={}", log.path().display())],
+            &[],
+        );
+        assert_verdict(&output, 1, "test counts in supplied log", expected);
+    }
+}
