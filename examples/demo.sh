@@ -16,6 +16,8 @@ export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
 unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE
+unset GIT_CONFIG_PARAMETERS GIT_REPLACE_REF_BASE
+export GIT_CONFIG_COUNT=0
 git init --quiet --initial-branch=main "$fixture"
 git -C "$fixture" config user.name Demo
 git -C "$fixture" config user.email demo@example.invalid
@@ -40,7 +42,7 @@ check_report() {
     printf 'Exit: %s\n\n' "$result"
 }
 
-report=$(printf '# Synthetic report\nCommitted as %s\nFile src/lib.rs exists\nTree is clean\n' "$commit")
+report=$(printf 'Committed as %s\nFile src/lib.rs exists\nTree is clean\n' "$commit")
 echo 'Synthetic demo: matching local evidence'
 check_report 0
 printf 'untracked\n' > "$fixture/notes.txt"
