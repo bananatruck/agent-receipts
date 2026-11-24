@@ -427,7 +427,7 @@ fn stored_symlinks_count_as_blobs_without_reading_the_target() {
 fn test_counts_require_a_matching_command_log_and_matching_summary() {
     let repository = Repository::new();
     let log = tempfile::NamedTempFile::new().unwrap();
-    fs::write(log.path(), "$ cargo test\ntest result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n").unwrap();
+    fs::write(log.path(), "$ cargo test\nrunning 77 tests\ntest result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n").unwrap();
     let flag = format!("cargo test={}", log.path().display());
     let output = repository.check_with(
         "Ran `cargo test`, 77 passed\nRan `cargo test`, 76 passed\nRan `pytest`, 77 passed\n",
@@ -778,4 +778,81 @@ fn bare_push_checks_head_and_explicit_hashes_require_commit_objects() {
     );
     assert_verdict(&output, 2, "local tracking ref ancestry", "contradicted");
     assert_verdict(&output, 3, "local tracking ref ancestry", "confirmed");
+}
+
+#[test]
+fn logs_require_anchored_records_complete_suites_and_no_runner_errors() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mut failures = Vec::new();
+    for (command, body, expected) in [
+        (
+            "pytest",
+            "note: $ pytest\n7 passed in 0.10s\n$ pytest\ncollecting ...\n",
+            "not checkable",
+        ),
+        (
+            "cargo test --no-fail-fast",
+            "$ cargo test --no-fail-fast\nRunning unittests src/lib.rs\nrunning 10 tests\nerror: process didn't exit successfully: SIGSEGV\nRunning tests/cli.rs\nrunning 7 tests\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\nerror: 1 target failed:\n",
+            "contradicted",
+        ),
+        (
+            "cargo test",
+            "$ cargo test\nrunning 10 tests\nRunning tests/cli.rs\nrunning 7 tests\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+            "not checkable",
+        ),
+        (
+            "cargo test",
+            "$ cargo test\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+            "not checkable",
+        ),
+        (
+            "cargo test",
+            "$ cargo test\nrunning 2 tests\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+            "not checkable",
+        ),
+        (
+            "cargo test",
+            "$ cargo test\nrunning 2 tests\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+            "not checkable",
+        ),
+        (
+            "vitest",
+            "$ vitest\nTests 7 passed (7)\nErrors 1 error\n",
+            "contradicted",
+        ),
+        (
+            "vitest",
+            "$ vitest\nTests 7 passed (7)\nErrors 2 errors\n",
+            "contradicted",
+        ),
+        (
+            "vitest",
+            "$ vitest\nTests 7 passed (7)\nType Errors 1 error\n",
+            "contradicted",
+        ),
+        (
+            "vitest",
+            "$ vitest\nTests 7 passed (7)\nUnhandled Errors\n",
+            "contradicted",
+        ),
+        (
+            "pytest",
+            "$ pytest\n7 passed in 0.10s\nINTERNALERROR> broken hook\n",
+            "contradicted",
+        ),
+        ("vitest", "$ vitest\nTests 7 passed (7)\n", "confirmed"),
+    ] {
+        fs::write(log.path(), body).unwrap();
+        let output = repository.check_with(
+            &format!("Ran `{command}`, 7 passed\n"),
+            &["--log", &format!("{command}={}", log.path().display())],
+            &[],
+        );
+        let expected_cell = format!("\t{expected}\t");
+        if !stdout(&output).contains(&expected_cell) {
+            failures.push(format!("{body:?}: {}", stdout(&output)));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

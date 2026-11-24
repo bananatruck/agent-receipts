@@ -42,16 +42,22 @@ impl Logs {
             .ok_or("no supplied log for this command")
             .and_then(|text| {
                 let records: Vec<_> = text
-                    .lines()
-                    .filter_map(|line| line.strip_prefix("$ "))
+                    .split_inclusive('\n')
+                    .scan(0, |offset, line| {
+                        let start = *offset;
+                        *offset += line.len();
+                        Some((start, line))
+                    })
+                    .filter_map(|(offset, line)| {
+                        line.trim_end_matches('\n')
+                            .strip_prefix("$ ")
+                            .map(|record| (offset + line.len(), record))
+                    })
                     .collect();
-                if records != [command] {
+                if records.len() != 1 || records[0].1 != command {
                     return Err("log must contain exactly one matching $ COMMAND record");
                 }
-                let body = text
-                    .split_once(&format!("$ {command}\n"))
-                    .map(|(_, body)| body)
-                    .ok_or("missing command output")?;
+                let body = &text[records[0].0..];
                 let parser: fn(&str) -> Option<Counts> =
                     match command.split_whitespace().collect::<Vec<_>>().as_slice() {
                         ["cargo", "test", ..] => cargo_summary,
@@ -99,31 +105,54 @@ impl Logs {
 
 pub fn cargo_summary(text: &str) -> Option<Counts> {
     static SUMMARY: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^test result: (?:ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; [0-9]+ ignored; [0-9]+ measured; [0-9]+ filtered out; finished in [0-9.]+s$").unwrap()
+        Regex::new(r"^test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured; [0-9]+ filtered out; finished in [0-9.]+s$").unwrap()
     });
+    static RUNNING: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^running ([0-9]+) tests?$").unwrap());
     let mut total = Counts {
         passed: 0,
         failed: 0,
     };
     let mut found = false;
-    let mut pending = false;
+    let mut announced = false;
+    let mut running = None;
     for line in text.lines().map(str::trim) {
-        if line.starts_with("running ") && (line.ends_with(" tests") || line.ends_with(" test")) {
-            pending = true;
-        }
         if line.starts_with("Running ") || line.starts_with("Doc-tests ") {
-            pending = true;
+            if announced || running.is_some() {
+                return None;
+            }
+            announced = true;
+        }
+        if let Some(c) = RUNNING.captures(line) {
+            if running.is_some() {
+                return None;
+            }
+            running = Some(c[1].parse::<u64>().ok()?);
         }
         if !line.starts_with("test result:") {
             continue;
         }
+        let expected = running.take()?;
         let c = SUMMARY.captures(line)?;
-        total.passed = total.passed.checked_add(c[1].parse().ok()?)?;
-        total.failed = total.failed.checked_add(c[2].parse().ok()?)?;
+        let passed: u64 = c[2].parse().ok()?;
+        let failed: u64 = c[3].parse().ok()?;
+        let ignored: u64 = c[4].parse().ok()?;
+        let measured: u64 = c[5].parse().ok()?;
+        if passed
+            .checked_add(failed)?
+            .checked_add(ignored)?
+            .checked_add(measured)?
+            != expected
+            || (c[1].eq("ok") && failed != 0)
+        {
+            return None;
+        }
+        total.passed = total.passed.checked_add(passed)?;
+        total.failed = total.failed.checked_add(failed)?;
         found = true;
-        pending = false;
+        announced = false;
     }
-    (found && !pending).then_some(total)
+    (found && !announced && running.is_none()).then_some(total)
 }
 
 #[cfg(test)]
@@ -134,7 +163,7 @@ mod tests {
     fn cargo_summaries_add_completed_suites_and_preserve_failures() {
         assert_eq!(
             cargo_summary(
-                "test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n"
+                "running 3 tests\ntest result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\nrunning 2 tests\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n"
             ),
             Some(Counts {
                 passed: 3,
@@ -284,7 +313,7 @@ fn javascript_summary(text: &str) -> Option<Counts> {
 
 fn runner_failure(text: &str) -> bool {
     static FAILURE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^(?:error: (?:test failed|could not compile)|test result: FAILED\.|(?:Test Suites:|Test Files)\s+.*\b[1-9][0-9]* failed\b|FAIL(?:\s|$)|ERROR collecting )").unwrap()
+        Regex::new(r"^(?:error: (?:test failed|could not compile|process didn't exit successfully|[0-9]+ targets? failed)|test result: FAILED\.|(?:Test Suites:|Test Files)\s+.*\b[1-9][0-9]* failed\b|(?:Type )?Errors\s+[1-9][0-9]* errors?\b|Unhandled Errors\b|INTERNALERROR>|FAIL(?:\s|$)|ERROR collecting )").unwrap()
     });
     text.lines().any(|line| FAILURE.is_match(line.trim()))
 }
