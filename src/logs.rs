@@ -18,7 +18,7 @@ impl Logs {
         let mut logs = BTreeMap::new();
         for value in values {
             let (command, path) = value
-                .split_once('=')
+                .rsplit_once('=')
                 .filter(|(c, p)| !c.is_empty() && !p.is_empty())
                 .ok_or("--log requires COMMAND=PATH, for example --log 'cargo test=run.txt'")?;
             let contents =

@@ -1056,3 +1056,17 @@ fn rename_separator_is_case_insensitive_and_outside_path_quotes() {
         assert_eq!(output.status.code(), Some(0), "{report}: {output:?}");
     }
 }
+
+#[test]
+fn log_flags_accept_commands_with_equals_arguments() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let command = "pytest --maxfail=1";
+    fs::write(log.path(), format!("$ {command}\n7 passed in 0.10s\n")).unwrap();
+    let output = repository.check_with(
+        &format!("Ran `{command}`, 7 passed\n"),
+        &["--log", &format!("{command}={}", log.path().display())],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+}
