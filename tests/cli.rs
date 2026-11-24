@@ -965,3 +965,48 @@ fn unverified_markdown_lines_prevent_success_in_both_output_formats() {
         }
     }
 }
+
+#[test]
+fn matching_failure_counts_are_valid_evidence_and_stdout_is_not_runner_status() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mut failures = Vec::new();
+    for (command, body, passed, failed) in [
+        ("pytest", "1 failed, 7 passed in 0.10s\n", 7, 1),
+        (
+            "cargo test",
+            "running 8 tests\ntest result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\nerror: test failed, to rerun pass --lib\n",
+            7,
+            1,
+        ),
+        (
+            "jest",
+            "FAIL a.test.js\nTest Suites: 1 failed, 1 total\nTests: 1 failed, 7 passed, 8 total\n",
+            7,
+            1,
+        ),
+        (
+            "vitest",
+            "Test Files 1 failed (1)\nTests 7 passed | 1 failed (8)\n",
+            7,
+            1,
+        ),
+        (
+            "cargo test",
+            "running 7 tests\nFAIL case handled properly\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+            7,
+            0,
+        ),
+    ] {
+        fs::write(log.path(), format!("$ {command}\n{body}")).unwrap();
+        let output = repository.check_with(
+            &format!("Ran `{command}`, {passed} passed, {failed} failed\n"),
+            &["--log", &format!("{command}={}", log.path().display())],
+            &[],
+        );
+        if output.status.code() != Some(0) {
+            failures.push(stdout(&output));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

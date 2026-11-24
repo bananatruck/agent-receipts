@@ -67,10 +67,11 @@ impl Logs {
                         }
                         _ => return Err("unsupported command family"),
                     };
-                if runner_failure(body) {
+                let counts = parser(body);
+                if runner_failure(command, body, counts.as_ref().is_some_and(|c| c.failed > 0)) {
                     return Ok(None);
                 }
-                parser(body)
+                counts
                     .map(Some)
                     .ok_or("no unambiguous supported completed test summary")
             });
@@ -82,10 +83,7 @@ impl Logs {
                 ),
             },
             Ok(Some(counts)) => Finding {
-                verdict: if counts.passed == passed
-                    && counts.failed == 0
-                    && failed.is_none_or(|n| n == counts.failed)
-                {
+                verdict: if counts.passed == passed && failed.unwrap_or(0) == counts.failed {
                     Verdict::Confirmed
                 } else {
                     Verdict::Contradicted
@@ -311,9 +309,20 @@ fn javascript_summary(text: &str) -> Option<Counts> {
     (sum == total).then_some(counts)
 }
 
-fn runner_failure(text: &str) -> bool {
-    static FAILURE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^(?:error: (?:test failed|could not compile|process didn't exit successfully|[0-9]+ targets? failed)|test result: FAILED\.|(?:Test Suites:|Test Files)\s+.*\b[1-9][0-9]* failed\b|(?:Type )?Errors\s+[1-9][0-9]* errors?\b|Unhandled Errors\b|INTERNALERROR>|FAIL(?:\s|$)|ERROR collecting )").unwrap()
+fn runner_failure(command: &str, text: &str, counted_failures: bool) -> bool {
+    static FATAL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?:error: (?:could not compile|process didn't exit successfully)|(?:Type )?Errors\s+[1-9][0-9]* errors?\b|Unhandled Errors\b|INTERNALERROR>|ERROR collecting )").unwrap()
     });
-    text.lines().any(|line| FAILURE.is_match(line.trim()))
+    static FAILED: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?:error: (?:test failed|[0-9]+ targets? failed)|test result: FAILED\.|(?:Test Suites:|Test Files)\s+.*\b[1-9][0-9]* failed\b)").unwrap()
+    });
+    let javascript = matches!(
+        command.split_whitespace().next(),
+        Some("vitest" | "jest" | "npx")
+    );
+    text.lines().map(str::trim).any(|line| {
+        FATAL.is_match(line)
+            || (!counted_failures
+                && (FAILED.is_match(line) || (javascript && line.starts_with("FAIL "))))
+    })
 }
