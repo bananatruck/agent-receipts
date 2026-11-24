@@ -74,6 +74,7 @@ An incomplete additional summary makes counts not checkable.
 Failures contradict test-success statements, even when the passed count matches.
 A statement that explicitly reports a nonzero failure count can confirm when both counts match.
 Runner errors outside those test counts, such as crashes, internal errors, or unhandled errors, contradict the statement.
+Diagnostics are recognized only for the corresponding command family.
 The output states that a supplied log is evidence only of its contents, not authentic execution in this checkout.
 
 This captures a real run with the required command record.
@@ -99,25 +100,25 @@ A bare count such as `77 tests passed` lacks a command and stays not checkable.
 
 The input in [examples/synthetic-history-report.md](examples/synthetic-history-report.md) is synthetic.
 The repository history and the test output used to check it are real.
-The run below was captured with HEAD at `e1a4914` and base `670dafc`, before this documentation commit.
-The captured test run reported 3 parser tests and 45 CLI tests passed, with no failures.
+The run below was captured with HEAD at `0c2f8fd` and base `670dafc`, before committing the command-family fix and refreshed example.
+The captured test run reported 3 parser tests and 50 CLI tests passed, with no failures.
 Re-running after later commits can change the endpoint hash and diff records, and adding tests can change the count verdicts.
 
 ```text
 LINE	STATEMENT	CHECK	VERDICT	EVIDENCE
 1	# Synthetic report about this repository's history	unsupported	not checkable	no supported assertion grammar; no evidence check performed
-3	Commit e1a4914 exists	commit exists locally	confirmed	local object e1a491403b3af2aaf1bbd55c9787c1e5d7c4e4c9 has type commit
+3	Commit 0c2f8fd exists	commit exists locally	confirmed	local object 0c2f8fd254f860be87ccd4bc9fd1bad03dbb4e16 has type commit
 4	File src/missing.rs exists	file at HEAD	contradicted	no file entry at HEAD:src/missing.rs
-5	Added src/logs.rs	committed path action	confirmed	committed diff 670dafc0136bcf3dd3f1e0443bd34619ed88945e..e1a491403b3af2aaf1bbd55c9787c1e5d7c4e4c9: M Cargo.lock; M Cargo.toml; M README.md; M SPEC.md; A examples/history-output.tsv; A examples/synthetic-history-report.md; M src/git.rs; A src/logs.rs; M src/main.rs; M src/report.rs; A submission/DEVPOST.md; A submission/demo-script.md; M tests/cli.rs; excludes working-tree changes and intermediate edits
-6	Did not modify LICENSE	committed diff scope	confirmed	committed diff 670dafc0136bcf3dd3f1e0443bd34619ed88945e..e1a491403b3af2aaf1bbd55c9787c1e5d7c4e4c9: M Cargo.lock; M Cargo.toml; M README.md; M SPEC.md; A examples/history-output.tsv; A examples/synthetic-history-report.md; M src/git.rs; A src/logs.rs; M src/main.rs; M src/report.rs; A submission/DEVPOST.md; A submission/demo-script.md; M tests/cli.rs; excludes working-tree changes and intermediate edits
-7	Ran `cargo test --locked --all-targets`, 48 passed	test counts in supplied log	confirmed	cargo test --locked --all-targets: 48 passed, 0 failed; evidence covers only what the supplied log contains, not execution or authenticity
-8	Ran `cargo test --locked --all-targets`, 49 passed	test counts in supplied log	contradicted	cargo test --locked --all-targets: 48 passed, 0 failed; evidence covers only what the supplied log contains, not execution or authenticity
+5	Added src/logs.rs	committed path action	confirmed	committed diff 670dafc0136bcf3dd3f1e0443bd34619ed88945e..0c2f8fd254f860be87ccd4bc9fd1bad03dbb4e16: M Cargo.lock; M Cargo.toml; M README.md; M SPEC.md; M examples/demo.sh; A examples/history-output.tsv; A examples/synthetic-history-report.md; M src/git.rs; A src/logs.rs; M src/main.rs; M src/report.rs; A submission/DEVPOST.md; A submission/demo-script.md; M tests/cli.rs; excludes working-tree changes and intermediate edits
+6	Did not modify LICENSE	committed diff scope	confirmed	committed diff 670dafc0136bcf3dd3f1e0443bd34619ed88945e..0c2f8fd254f860be87ccd4bc9fd1bad03dbb4e16: M Cargo.lock; M Cargo.toml; M README.md; M SPEC.md; M examples/demo.sh; A examples/history-output.tsv; A examples/synthetic-history-report.md; M src/git.rs; A src/logs.rs; M src/main.rs; M src/report.rs; A submission/DEVPOST.md; A submission/demo-script.md; M tests/cli.rs; excludes working-tree changes and intermediate edits
+7	Ran `cargo test --locked --all-targets`, 53 passed	test counts in supplied log	confirmed	cargo test --locked --all-targets: 53 passed, 0 failed; evidence covers only what the supplied log contains, not execution or authenticity
+8	Ran `cargo test --locked --all-targets`, 54 passed	test counts in supplied log	contradicted	cargo test --locked --all-targets: 53 passed, 0 failed; evidence covers only what the supplied log contains, not execution or authenticity
 9	Not pushed	local tracking ref ancestry	not checkable	supply --remote-ref refs/remotes/NAME/BRANCH; no network is used
 Summary: 4 confirmed, 2 contradicted, 2 not checkable
 Exit: 1
 ```
 
-The missing file and the count of 49 are contradicted.
+The missing file and the count of 54 are contradicted.
 The report heading is retained as not checkable.
 The addition and LICENSE exclusion match the committed diff.
 `Not pushed` stays not checkable because this run supplies no tracking ref.

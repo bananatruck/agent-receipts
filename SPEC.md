@@ -116,6 +116,7 @@ Differing counts contradict the statement.
 Crashes, compilation errors, internal errors, and unhandled errors cannot be accounted for by a test failure count and contradict the statement.
 Jest suite-loading errors also contradict a statement that accurately reports assertion failure counts.
 Ordinary stdout beginning with FAIL is not a Cargo runner status.
+Cargo diagnostics apply only to Cargo commands, pytest diagnostics only to pytest, and JavaScript diagnostics only to Vitest or Jest.
 All log evidence describes only what the supplied text contains, not execution, authenticity, repository identity, or freshness.
 Truncation between completed suites without a visible next-suite start cannot be detected.
 

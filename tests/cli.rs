@@ -1206,6 +1206,56 @@ fn suite_loading_errors_cannot_be_accounted_for_by_failed_test_counts() {
 }
 
 #[test]
+fn runner_diagnostics_are_scoped_to_the_command_family() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mut failures = Vec::new();
+    for (command, family, summary) in [
+        (
+            "cargo test",
+            "cargo",
+            "running 1 test\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+        ),
+        ("pytest -s", "pytest", "1 passed in 0.10s\n"),
+        ("vitest", "javascript", "Tests 1 passed (1)\n"),
+        ("npx vitest", "javascript", "Tests 1 passed (1)\n"),
+        ("jest", "javascript", "Tests: 1 passed, 1 total\n"),
+        ("npx jest", "javascript", "Tests: 1 passed, 1 total\n"),
+    ] {
+        for (origin, diagnostic) in [
+            ("cargo", "error: could not compile fixture"),
+            (
+                "cargo",
+                "error: process didn't exit successfully: signal: 11",
+            ),
+            ("cargo", "error: test failed, to rerun pass --lib"),
+            ("cargo", "error: 1 target failed:"),
+            ("cargo", "test result: FAILED."),
+            ("pytest", "INTERNALERROR> RuntimeError: fixture"),
+            ("pytest", "ERROR collecting tests/test_fixture.py"),
+            ("javascript", "Unhandled Errors"),
+            ("javascript", "Errors 1 error"),
+            ("javascript", "Type Errors 1 error"),
+            ("javascript", "FAIL fixture.test.js"),
+            ("javascript", "Test Suites: 1 failed, 1 total"),
+            ("javascript", "Test Files 1 failed (1)"),
+        ] {
+            fs::write(log.path(), format!("$ {command}\n{diagnostic}\n{summary}")).unwrap();
+            let output = repository.check_with(
+                &format!("Ran `{command}`, 1 passed\n"),
+                &["--log", &format!("{command}={}", log.path().display())],
+                &[],
+            );
+            let expected = if family == origin { 1 } else { 0 };
+            if output.status.code() != Some(expected) {
+                failures.push(format!("{command}, {diagnostic:?}: {}", stdout(&output)));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn all_file_actions_refuse_submodule_entries() {
     let repository = Repository::new();
     repository.write("a.txt", "fixture\n");

@@ -320,26 +320,39 @@ fn javascript_summary(text: &str) -> Option<Counts> {
 }
 
 fn runner_failure(command: &str, text: &str, counted_failures: bool) -> bool {
-    static FATAL: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^(?:error: (?:could not compile|process didn't exit successfully)|(?:Type )?Errors\s+[1-9][0-9]* errors?\b|Unhandled Errors\b|INTERNALERROR>|ERROR collecting )").unwrap()
+    static CARGO_FATAL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^error: (?:could not compile|process didn't exit successfully)").unwrap()
     });
-    static FAILED: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^(?:error: (?:test failed|[0-9]+ targets? failed)|test result: FAILED\.|(?:Test Suites:|Test Files)\s+.*\b[1-9][0-9]* failed\b)").unwrap()
+    static CARGO_FAILED: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?:error: (?:test failed|[0-9]+ targets? failed)|test result: FAILED\.)")
+            .unwrap()
     });
-    let javascript = matches!(
-        command.split_whitespace().next(),
-        Some("vitest" | "jest" | "npx")
-    );
-    let jest = matches!(
-        command.split_whitespace().collect::<Vec<_>>().as_slice(),
-        ["jest", ..] | ["npx", "jest", ..]
-    );
-    text.lines().map(str::trim).any(|line| {
-        FATAL.is_match(line)
-            || (jest
-                && line.strip_prefix('●').unwrap_or(line).trim_start()
-                    == "Test suite failed to run")
-            || (!counted_failures
-                && (FAILED.is_match(line) || (javascript && line.starts_with("FAIL "))))
+    static JAVASCRIPT_FATAL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?:(?:Type )?Errors\s+[1-9][0-9]* errors?\b|Unhandled Errors\b)").unwrap()
+    });
+    static JAVASCRIPT_FAILED: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?:Test Suites:|Test Files)\s+.*\b[1-9][0-9]* failed\b").unwrap()
+    });
+    let mut words = command.split_whitespace();
+    let runner = match words.next() {
+        Some("npx") => words.next(),
+        runner => runner,
+    };
+    text.lines().map(str::trim).any(|line| match runner {
+        Some("cargo") => {
+            CARGO_FATAL.is_match(line) || (!counted_failures && CARGO_FAILED.is_match(line))
+        }
+        Some("pytest") => {
+            line.starts_with("INTERNALERROR>") || line.starts_with("ERROR collecting ")
+        }
+        Some("vitest" | "jest") => {
+            JAVASCRIPT_FATAL.is_match(line)
+                || (runner == Some("jest")
+                    && line.strip_prefix('●').unwrap_or(line).trim_start()
+                        == "Test suite failed to run")
+                || (!counted_failures
+                    && (JAVASCRIPT_FAILED.is_match(line) || line.starts_with("FAIL ")))
+        }
+        _ => false,
     })
 }
