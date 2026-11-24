@@ -66,7 +66,10 @@ impl Repository {
 
     fn check_with(&self, report: &str, args: &[&str], environment: &[(&str, &str)]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_agent-receipts"));
-        command.arg("--repo").arg(self.path()).args(args);
+        if !args.contains(&"--repo") {
+            command.arg("--repo").arg(self.path());
+        }
+        command.args(args);
         for (name, value) in environment {
             command.env(name, value);
         }
@@ -1100,4 +1103,60 @@ fn normal_stdout_is_not_an_extra_test_summary() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn all_file_actions_refuse_submodule_entries() {
+    let repository = Repository::new();
+    repository.write("a.txt", "fixture\n");
+    let hash = repository.commit();
+    repository.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("160000,{hash},sub"),
+    ]);
+    repository.git(&["commit", "-m", "Add link"]);
+    let base = repository.git(&["rev-parse", "HEAD"]);
+    repository.git(&["update-index", "--force-remove", "sub"]);
+    repository.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("160000,{hash},newsub"),
+    ]);
+    repository.git(&["commit", "-m", "Move link"]);
+    let output = repository.check_with(
+        "Deleted sub\nRenamed sub to newsub\n",
+        &["--base", &base],
+        &[],
+    );
+    for line in 1..=2 {
+        assert_verdict(&output, line, "committed path action", "not checkable");
+    }
+}
+
+#[test]
+fn clean_checks_from_subdirectories_inspect_all_index_flags() {
+    let repository = Repository::new();
+    repository.write("src/a.txt", "fixture\n");
+    repository.write("outside.txt", "before\n");
+    repository.commit();
+    repository.git(&["update-index", "--skip-worktree", "outside.txt"]);
+    repository.write("outside.txt", "after\n");
+    let output = repository.check_with(
+        "Tree is clean\n",
+        &["--repo", repository.path().join("src").to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+}
+
+#[test]
+fn list_code_indentation_counts_tab_columns() {
+    let repository = Repository::new();
+    repository.write("a.txt", "fixture\n");
+    repository.commit();
+    let output = repository.check("- \t\tTree is clean\n");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
 }

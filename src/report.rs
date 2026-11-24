@@ -82,13 +82,19 @@ pub fn parse(text: &str) -> Vec<Statement> {
             let source = raw.trim();
             let indented = indentation(raw) >= 4;
             let content = PREFIX.replace(source, "");
-            let list_code = content.len() != source.len()
-                && source[..source.len() - content.len()]
-                    .chars()
-                    .rev()
-                    .take_while(|c| c.is_whitespace())
-                    .count()
-                    >= 5;
+            let prefix = &source[..source.len() - content.len()];
+            let marker_width = prefix.trim_end().len();
+            let padding = prefix[marker_width..]
+                .chars()
+                .fold(marker_width, |column, c| {
+                    if c == '\t' {
+                        column + 4 - column % 4
+                    } else {
+                        column + 1
+                    }
+                })
+                - marker_width;
+            let list_code = padding >= 5;
             let delimiter = if fence.is_none() {
                 content.as_ref()
             } else {

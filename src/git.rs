@@ -35,7 +35,7 @@ pub struct Repository {
 
 impl Repository {
     pub fn open(path: PathBuf) -> Result<Self, String> {
-        let repository = Self { path };
+        let mut repository = Self { path };
         let output = repository.git(&["rev-parse", "--is-inside-work-tree"])?;
         if !output.status.success() || output.stdout != b"true\n" {
             return Err(format!(
@@ -44,6 +44,8 @@ impl Repository {
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
+        let root = successful_text(repository.git(&["rev-parse", "--show-toplevel"])?)?;
+        repository.path = PathBuf::from(root.strip_suffix('\n').ok_or("missing repository root")?);
         Ok(repository)
     }
 
@@ -171,9 +173,16 @@ impl Repository {
                         return Err("exclusion requires a literal file present at a diff endpoint; directories, missing paths and submodule contents are not checkable".into());
                     }
                 }
-                DiffClaim::Action(PathAction::Added(path)) if !self.blob_entry(&head, path)? => {
-                    if self.entry_mode(&head, path)?.as_deref() == Some("160000") {
-                        return Err("file actions do not check submodule entries".into());
+                DiffClaim::Action(action) => {
+                    let paths = match action {
+                        PathAction::Added(path) | PathAction::Deleted(path) => vec![path],
+                        PathAction::Renamed { from, to } => from.iter().chain(std::iter::once(to)).collect(),
+                    };
+                    for path in paths {
+                        if self.entry_mode(&base, path)?.as_deref() == Some("160000")
+                            || self.entry_mode(&head, path)?.as_deref() == Some("160000") {
+                            return Err("file actions do not check submodule entries".into());
+                        }
                     }
                 }
                 _ => {}
