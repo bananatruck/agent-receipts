@@ -933,6 +933,33 @@ fn cleanliness_never_executes_configured_filters() {
 }
 
 #[test]
+fn clean_filter_preflight_ignores_inherited_config_file() {
+    let repository = Repository::new();
+    repository.write(".gitattributes", "a.txt filter=probe\n");
+    repository.write("a.txt", "before\n");
+    repository.commit();
+    let environment = [("GIT_CONFIG", "/dev/null")];
+    let output = repository.check_with("Tree is clean\n", &[], &environment);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+
+    repository.write("a.txt", "change\n");
+    let output = repository.check_with("Tree is clean\n", &[], &environment);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+
+    let marker = repository.path().join(".git/filter-executed");
+    repository.git(&[
+        "config",
+        "filter.probe.clean",
+        &format!("touch '{}'; cat", marker.display()),
+    ]);
+    let output = repository.check_with("Tree is clean\n", &[], &environment);
+    assert!(!marker.exists(), "configured filter executed: {output:?}");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_verdict(&output, 1, "working tree clean", "not checkable");
+    assert!(stdout(&output).contains("configured clean or process filters"));
+}
+
+#[test]
 fn terminal_output_escapes_direction_and_format_controls() {
     let repository = Repository::new();
     let output = repository.check(

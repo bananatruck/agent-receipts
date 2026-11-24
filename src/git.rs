@@ -68,6 +68,7 @@ impl Repository {
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_COUNT", "0")
             .env_remove("GIT_CONFIG_PARAMETERS")
+            .env_remove("GIT_CONFIG")
             .env_remove("GIT_REPLACE_REF_BASE")
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
