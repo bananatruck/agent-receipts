@@ -8,8 +8,7 @@ static COMMIT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?:committed as (`?[0-9a-f]{7,64}`?)|commit (`?[0-9a-f]{7,64}`?) exists)$")
         .unwrap()
 });
-static FILE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^(?:file (.+) exists|added (.+))$").unwrap());
+static FILE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^file (.+) exists$").unwrap());
 
 static TESTS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^ran `([^`]+)`, ([0-9]+) passed(?:, ([0-9]+) failed)?$").unwrap()
@@ -22,9 +21,23 @@ static PUSHED: LazyLock<Regex> = LazyLock::new(|| {
 static SCOPE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(only touched|did not modify) (.+)$").unwrap());
 
-pub enum Claim {
+static ACTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^(added|created|deleted|renamed) (.+)$").unwrap());
+
+pub enum PathAction {
+    Added(String),
+    Deleted(String),
+    Renamed { from: Option<String>, to: String },
+}
+
+pub enum DiffClaim {
     OnlyTouched(Vec<String>),
     DidNotModify(String),
+    Action(PathAction),
+}
+
+pub enum Claim {
+    Diff(DiffClaim),
     Pushed {
         pushed: bool,
         commit: Option<String>,
@@ -43,7 +56,8 @@ pub enum Claim {
 impl Claim {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::OnlyTouched(_) | Self::DidNotModify(_) => "committed diff scope",
+            Self::Diff(DiffClaim::Action(_)) => "committed path action",
+            Self::Diff(_) => "committed diff scope",
             Self::Pushed { .. } => "local tracking ref ancestry",
             Self::Tests { .. } => "test counts in supplied log",
             Self::Commit(_) => "commit exists locally",
@@ -132,13 +146,39 @@ fn argument(value: &str) -> Option<&str> {
 }
 
 fn parse_claim(content: &str) -> Claim {
+    if let Some(c) = ACTION.captures(content) {
+        let action = match c[1].to_ascii_lowercase().as_str() {
+            "added" | "created" => path_argument(&c[2]).map(PathAction::Added),
+            "deleted" => path_argument(&c[2]).map(PathAction::Deleted),
+            "renamed" => {
+                if let Some(to) = path_argument(&c[2]) {
+                    Some(PathAction::Renamed { from: None, to })
+                } else if let Some((from, to)) = c[2].split_once(" to ") {
+                    path_argument(from)
+                        .zip(path_argument(to))
+                        .map(|(from, to)| PathAction::Renamed {
+                            from: Some(from),
+                            to,
+                        })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        return action
+            .map(|a| Claim::Diff(DiffClaim::Action(a)))
+            .unwrap_or_else(|| {
+                Claim::Unsupported("expected literal repository-relative path arguments".into())
+            });
+    }
     if let Some(c) = SCOPE.captures(content) {
         if c[1].eq_ignore_ascii_case("did not modify") {
             if let Some(path) = path_argument(&c[2]) {
-                return Claim::DidNotModify(path);
+                return Claim::Diff(DiffClaim::DidNotModify(path));
             }
         } else if let Some(paths) = path_list(&c[2]) {
-            return Claim::OnlyTouched(paths);
+            return Claim::Diff(DiffClaim::OnlyTouched(paths));
         }
         return Claim::Unsupported(
             "expected literal repository-relative paths, separated by comma and space".into(),

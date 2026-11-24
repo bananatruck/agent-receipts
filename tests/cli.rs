@@ -103,7 +103,7 @@ fn checks_commit_and_file_statements_against_head() {
     repository.write("src/lib.rs", "pub fn value() -> u8 { 7 }\n");
     let hash = repository.commit();
     let report = format!(
-        "# Synthetic report\n\n- Committed as `{hash}`.\n- Added `src/lib.rs`.\n\
+        "# Synthetic report\n\n- Committed as `{hash}`.\n- File `src/lib.rs` exists.\n\
          - Commit 0000000000000000000000000000000000000000 exists.\n\
          - File `src/missing.rs` exists.\n"
     );
@@ -554,4 +554,41 @@ fn scope_statements_check_every_path_in_the_committed_diff() {
         &[],
     );
     assert_verdict(&output, 1, "committed diff scope", "not checkable");
+}
+
+#[test]
+fn path_actions_require_the_matching_diff_status() {
+    let repository = Repository::new();
+    repository.write("gone.txt", "delete\n");
+    repository.write("old name.txt", "rename this file with unchanged content\n");
+    repository.write("modified.txt", "before\n");
+    let base = repository.commit();
+    repository.git(&["rm", "gone.txt"]);
+    repository.git(&["mv", "old name.txt", "new name.txt"]);
+    repository.write("added.txt", "add\n");
+    repository.write("modified.txt", "after\n");
+    repository.commit();
+    let output = repository.check_with("Added added.txt\nCreated added.txt\nDeleted gone.txt\nRenamed `new name.txt`\nRenamed `old name.txt` to `new name.txt`\nAdded modified.txt\nCreated gone.txt\nDeleted added.txt\nRenamed added.txt\nDid not modify `old name.txt`\nOnly touched added.txt, gone.txt, modified.txt, `new name.txt`\n", &["--base", &base], &[]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    for line in 1..=9 {
+        assert_verdict(
+            &output,
+            line,
+            "committed path action",
+            if line <= 5 {
+                "confirmed"
+            } else {
+                "contradicted"
+            },
+        );
+    }
+    for line in [10, 11] {
+        assert_verdict(&output, line, "committed diff scope", "contradicted");
+    }
+    let output = repository
+        .check("Added added.txt\nCreated added.txt\nDeleted gone.txt\nRenamed `new name.txt`\n");
+    assert_eq!(output.status.code(), Some(3));
+    for line in 1..=4 {
+        assert_verdict(&output, line, "committed path action", "not checkable");
+    }
 }

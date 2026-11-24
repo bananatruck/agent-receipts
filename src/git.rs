@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-use crate::report::Claim;
+use crate::report::{Claim, DiffClaim, PathAction};
 
 pub enum Verdict {
     Confirmed,
@@ -69,7 +69,7 @@ impl Repository {
             Claim::Commit(hash) => self.commit(hash),
             Claim::File(path) => self.file(path),
             Claim::CleanTree => self.clean_tree(),
-            Claim::OnlyTouched(_) | Claim::DidNotModify(_) => Err("no base commit evidence".into()),
+            Claim::Diff(_) => Err("no base commit evidence".into()),
             Claim::Pushed { .. } => Err("no tracking ref evidence".into()),
             Claim::Tests { .. } => Err("no supplied log".into()),
             Claim::Unsupported(reason) => Ok(Finding {
@@ -128,13 +128,17 @@ impl Repository {
         Ok((base, head, changes))
     }
 
-    pub fn verify_diff(&self, claim: &Claim, base: Option<&str>) -> Finding {
+    pub fn verify_diff(&self, claim: &DiffClaim, base: Option<&str>) -> Finding {
         let result = self.changes(base).map(|(base, head, changes)| {
             let paths: Vec<_> = changes.iter().flat_map(|change| change.paths.iter()).collect();
             let matches = match claim {
-                Claim::OnlyTouched(allowed) => paths.iter().all(|p| allowed.contains(p)),
-                Claim::DidNotModify(path) => !paths.contains(&path),
-                _ => unreachable!("diff claims only"),
+                DiffClaim::OnlyTouched(allowed) => paths.iter().all(|p| allowed.contains(p)),
+                DiffClaim::DidNotModify(path) => !paths.contains(&path),
+                DiffClaim::Action(action) => changes.iter().any(|change| match action {
+                    PathAction::Added(path) => change.status == "A" && change.paths.first() == Some(path),
+                    PathAction::Deleted(path) => change.status == "D" && change.paths.first() == Some(path),
+                    PathAction::Renamed { from, to } => change.status.starts_with('R') && change.paths.last() == Some(to) && from.as_ref().is_none_or(|from| change.paths.first() == Some(from)),
+                }),
             };
             Finding {
                 verdict: if matches { Verdict::Confirmed } else { Verdict::Contradicted },

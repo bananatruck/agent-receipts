@@ -88,9 +88,7 @@ fn run(args: Args) -> Result<u8, String> {
                 &named_commits,
                 args.remote_ref.as_deref(),
             ),
-            report::Claim::OnlyTouched(_) | report::Claim::DidNotModify(_) => {
-                repository.verify_diff(&statement.claim, args.base.as_deref())
-            }
+            report::Claim::Diff(claim) => repository.verify_diff(claim, args.base.as_deref()),
             _ => repository.verify(&statement.claim),
         };
         match finding.verdict {
