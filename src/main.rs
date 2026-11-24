@@ -95,13 +95,6 @@ fn run(args: Args) -> Result<u8, String> {
     let mut contradicted = 0;
     let mut unknown = 0;
     let statements = report::parse(&report);
-    let named_commits: Vec<_> = statements
-        .iter()
-        .filter_map(|s| match &s.claim {
-            report::Claim::Commit(hash) => Some(hash.as_str()),
-            _ => None,
-        })
-        .collect();
     for statement in &statements {
         let finding = match &statement.claim {
             report::Claim::Tests {
@@ -109,12 +102,9 @@ fn run(args: Args) -> Result<u8, String> {
                 passed,
                 failed,
             } => logs.verify(command, *passed, *failed),
-            report::Claim::Pushed { pushed, commit } => repository.pushed(
-                *pushed,
-                commit.as_deref(),
-                &named_commits,
-                args.remote_ref.as_deref(),
-            ),
+            report::Claim::Pushed { pushed, commit } => {
+                repository.pushed(*pushed, commit.as_deref(), args.remote_ref.as_deref())
+            }
             report::Claim::Diff(claim) => repository.verify_diff(claim, args.base.as_deref()),
             _ => repository.verify(&statement.claim),
         };

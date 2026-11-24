@@ -513,7 +513,7 @@ fn pushed_statements_compare_named_commits_with_a_local_tracking_ref() {
         &args,
         &[],
     );
-    assert_verdict(&output, 2, "local tracking ref ancestry", "confirmed");
+    assert_verdict(&output, 2, "local tracking ref ancestry", "contradicted");
     assert_verdict(&output, 3, "local tracking ref ancestry", "confirmed");
     assert_verdict(&output, 4, "local tracking ref ancestry", "contradicted");
     assert!(stdout(&output).contains("local snapshot"));
@@ -749,4 +749,33 @@ fn file_actions_do_not_confirm_gitlinks_or_their_contents() {
             "not checkable",
         );
     }
+}
+
+#[test]
+fn bare_push_checks_head_and_explicit_hashes_require_commit_objects() {
+    let repository = Repository::new();
+    repository.write("a.txt", "first\n");
+    let first = repository.commit();
+    repository.git(&["update-ref", "refs/remotes/origin/main", &first]);
+    repository.git(&["tag", "-a", "v1", "-m", "Fixture tag"]);
+    let tag = repository.git(&["rev-parse", "v1"]);
+    repository.write("a.txt", "second\n");
+    repository.commit();
+    let args = ["--remote-ref", "refs/remotes/origin/main"];
+    let output = repository.check_with(&format!("Pushed {tag}\nNot pushed {tag}\n"), &args, &[]);
+    for line in 1..=2 {
+        assert_verdict(
+            &output,
+            line,
+            "local tracking ref ancestry",
+            "not checkable",
+        );
+    }
+    let output = repository.check_with(
+        &format!("Commit {first} exists\nPushed\nNot pushed\n"),
+        &args,
+        &[],
+    );
+    assert_verdict(&output, 2, "local tracking ref ancestry", "contradicted");
+    assert_verdict(&output, 3, "local tracking ref ancestry", "confirmed");
 }

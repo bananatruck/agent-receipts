@@ -185,14 +185,8 @@ impl Repository {
         })
     }
 
-    pub fn pushed(
-        &self,
-        pushed: bool,
-        commit: Option<&str>,
-        named: &[&str],
-        remote: Option<&str>,
-    ) -> Finding {
-        let result = self.pushed_evidence(pushed, commit, named, remote);
+    pub fn pushed(&self, pushed: bool, commit: Option<&str>, remote: Option<&str>) -> Finding {
+        let result = self.pushed_evidence(pushed, commit, remote);
         result.unwrap_or_else(|evidence| Finding {
             verdict: Verdict::NotCheckable,
             evidence,
@@ -203,7 +197,6 @@ impl Repository {
         &self,
         pushed: bool,
         commit: Option<&str>,
-        named: &[&str],
         remote: Option<&str>,
     ) -> Result<Finding, String> {
         let remote =
@@ -216,23 +209,26 @@ impl Repository {
         let target = successful_text(self.git(&["show-ref", "--verify", "--hash", remote])?)?;
         let target = target.trim();
         successful_text(self.git(&["cat-file", "-e", &format!("{target}^{{commit}}")])?)?;
-        let commits = if let Some(commit) = commit {
-            vec![commit]
-        } else if named.is_empty() {
-            vec!["HEAD"]
+        let resolved = if let Some(hash) = commit {
+            let objects =
+                successful_text(self.git(&["rev-parse", &format!("--disambiguate={hash}")])?)?;
+            let objects: Vec<_> = objects.lines().collect();
+            let [object] = objects.as_slice() else {
+                return Err("explicit hash must identify exactly one local commit object".into());
+            };
+            if successful_text(self.git(&["cat-file", "-t", object])?)?.trim() != "commit" {
+                return Err("explicit hash does not identify a commit object".into());
+            }
+            (*object).to_owned()
         } else {
-            named.to_vec()
+            successful_text(self.git(&["rev-parse", "--verify", "HEAD^{commit}"])?)?
+                .trim()
+                .to_owned()
         };
+        let resolved = resolved.as_str();
         let mut evidence = Vec::new();
         let mut matches = true;
-        for commit in commits {
-            let resolved = successful_text(self.git(&[
-                "rev-parse",
-                "--verify",
-                "--end-of-options",
-                &format!("{commit}^{{commit}}"),
-            ])?)?;
-            let resolved = resolved.trim();
+        {
             let output = self.git(&["merge-base", "--is-ancestor", resolved, target])?;
             let present = match output.status.code() {
                 Some(0) => true,
