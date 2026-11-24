@@ -216,9 +216,10 @@ fn unsupported_reports_never_succeed_without_evidence() {
     let repository = Repository::new();
     let output = repository.check("77 tests passed\nNot pushed\nRan `cargo test`\n");
     assert_eq!(output.status.code(), Some(3), "{output:?}");
-    for line in [1, 2, 3] {
+    for line in [1, 3] {
         assert_verdict(&output, line, "unsupported", "not checkable");
     }
+    assert_verdict(&output, 2, "local tracking ref ancestry", "not checkable");
     let output = repository.check("# Synthetic report\n\n");
     assert_eq!(output.status.code(), Some(3), "{output:?}");
     assert!(stdout(&output).contains("0 confirmed, 0 contradicted, 0 not checkable"));
@@ -491,5 +492,34 @@ fn logs_reject_missing_ambiguous_or_failed_evidence() {
         let output = repository.check_with("", &["--log", &flag], &[]);
         assert_eq!(output.status.code(), Some(2));
         assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn pushed_statements_compare_named_commits_with_a_local_tracking_ref() {
+    let repository = Repository::new();
+    repository.write("README.md", "first\n");
+    let first = repository.commit();
+    repository.git(&["update-ref", "refs/remotes/origin/main", &first]);
+    repository.write("README.md", "second\n");
+    let second = repository.commit();
+    let args = ["--remote-ref", "refs/remotes/origin/main"];
+    let output = repository.check_with("Not pushed\nPushed\n", &args, &[]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_verdict(&output, 1, "local tracking ref ancestry", "confirmed");
+    assert_verdict(&output, 2, "local tracking ref ancestry", "contradicted");
+    let output = repository.check_with(
+        &format!("Commit {first} exists\nPushed\nNot pushed {second}\nPushed {second}\n"),
+        &args,
+        &[],
+    );
+    assert_verdict(&output, 2, "local tracking ref ancestry", "confirmed");
+    assert_verdict(&output, 3, "local tracking ref ancestry", "confirmed");
+    assert_verdict(&output, 4, "local tracking ref ancestry", "contradicted");
+    assert!(stdout(&output).contains("local snapshot"));
+    for args in [vec![], vec!["--remote-ref", "refs/remotes/missing/main"]] {
+        let output = repository.check_with("Not pushed\n", &args, &[]);
+        assert_eq!(output.status.code(), Some(3));
+        assert_verdict(&output, 1, "local tracking ref ancestry", "not checkable");
     }
 }

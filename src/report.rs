@@ -15,7 +15,15 @@ static TESTS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^ran `([^`]+)`, ([0-9]+) passed(?:, ([0-9]+) failed)?$").unwrap()
 });
 
+static PUSHED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(not pushed|did not push|pushed)(?: (`?[0-9a-f]{7,64}`?))?$").unwrap()
+});
+
 pub enum Claim {
+    Pushed {
+        pushed: bool,
+        commit: Option<String>,
+    },
     Tests {
         command: String,
         passed: u64,
@@ -30,6 +38,7 @@ pub enum Claim {
 impl Claim {
     pub fn label(&self) -> &'static str {
         match self {
+            Self::Pushed { .. } => "local tracking ref ancestry",
             Self::Tests { .. } => "test counts in supplied log",
             Self::Commit(_) => "commit exists locally",
             Self::File(_) => "file at HEAD",
@@ -117,6 +126,19 @@ fn argument(value: &str) -> Option<&str> {
 }
 
 fn parse_claim(content: &str) -> Claim {
+    if let Some(c) = PUSHED.captures(content) {
+        let commit = match c.get(2) {
+            Some(value) => match argument(value.as_str()) {
+                Some(hash) => Some(hash.to_ascii_lowercase()),
+                None => return Claim::Unsupported("unpaired commit quoting".into()),
+            },
+            None => None,
+        };
+        return Claim::Pushed {
+            pushed: c[1].eq_ignore_ascii_case("pushed"),
+            commit,
+        };
+    }
     if let Some(c) = TESTS.captures(content) {
         if let Ok(passed) = c[2].parse() {
             let failed = c.get(3).map(|v| v.as_str().parse::<u64>());

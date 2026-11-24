@@ -22,6 +22,9 @@ struct Args {
     /// Captured UTF-8 log associated with COMMAND, repeatable
     #[arg(long = "log", value_name = "COMMAND=PATH")]
     logs: Vec<String>,
+    /// Existing local tracking ref, for example refs/remotes/origin/main
+    #[arg(long)]
+    remote_ref: Option<String>,
     /// UTF-8 report file, or - for stdin
     #[arg(long, default_value = "-")]
     report: PathBuf,
@@ -61,13 +64,27 @@ fn run(args: Args) -> Result<u8, String> {
     let mut confirmed = 0;
     let mut contradicted = 0;
     let mut unknown = 0;
-    for statement in report::parse(&report) {
+    let statements = report::parse(&report);
+    let named_commits: Vec<_> = statements
+        .iter()
+        .filter_map(|s| match &s.claim {
+            report::Claim::Commit(hash) => Some(hash.as_str()),
+            _ => None,
+        })
+        .collect();
+    for statement in &statements {
         let finding = match &statement.claim {
             report::Claim::Tests {
                 command,
                 passed,
                 failed,
             } => logs.verify(command, *passed, *failed),
+            report::Claim::Pushed { pushed, commit } => repository.pushed(
+                *pushed,
+                commit.as_deref(),
+                &named_commits,
+                args.remote_ref.as_deref(),
+            ),
             _ => repository.verify(&statement.claim),
         };
         match finding.verdict {
