@@ -70,6 +70,7 @@ Use plain output without ANSI color codes.
 The cargo parser requires matching `running N tests` headers and completed summaries, and combines completed suites.
 Missing headers, mismatched suite totals, duplicate summaries, and unfinished suites stay not checkable.
 The other parsers require one unambiguous final test summary.
+An incomplete additional summary makes counts not checkable.
 Failures contradict test-success statements, even when the passed count matches.
 A statement that explicitly reports a nonzero failure count can confirm when both counts match.
 Runner errors outside those test counts, such as crashes, internal errors, or unhandled errors, contradict the statement.

@@ -201,16 +201,24 @@ mod pytest_tests {
     }
 }
 fn pytest_summary(text: &str) -> Option<Counts> {
+    static START: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"^[0-9]+ (?:passed|failed|errors?|skipped|deselected|xfailed|xpassed|warnings?)\b",
+        )
+        .unwrap()
+    });
     static SUMMARY: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"^([0-9]+ (?:passed|failed|errors?|skipped|deselected|xfailed|xpassed|warnings?)\b.*) in [0-9.]+s(?: \(.*\))?$").unwrap()
     });
     let summaries: Vec<_> = text
         .lines()
-        .filter_map(|line| SUMMARY.captures(line.trim().trim_matches('=').trim()))
+        .map(|line| line.trim().trim_matches('=').trim())
+        .filter(|line| START.is_match(line))
         .collect();
-    let [summary] = summaries.as_slice() else {
+    let [line] = summaries.as_slice() else {
         return None;
     };
+    let summary = SUMMARY.captures(line)?;
     count_items(
         &summary[1],
         &[
@@ -282,17 +290,13 @@ mod javascript_tests {
     }
 }
 fn javascript_summary(text: &str) -> Option<Counts> {
+    static START: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Tests(?::|\s+[0-9])").unwrap());
     static VITEST: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"^Tests\s+(.+) \(([0-9]+)\)$").unwrap());
     let lines: Vec<_> = text
         .lines()
         .map(str::trim)
-        .filter(|line| {
-            VITEST.is_match(line)
-                || line
-                    .strip_prefix("Tests:")
-                    .is_some_and(|body| body.trim_start().starts_with(|c: char| c.is_ascii_digit()))
-        })
+        .filter(|line| START.is_match(line))
         .collect();
     let [line] = lines.as_slice() else {
         return None;

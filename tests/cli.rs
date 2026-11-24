@@ -1106,6 +1106,36 @@ fn normal_stdout_is_not_an_extra_test_summary() {
 }
 
 #[test]
+fn incomplete_summaries_cannot_leave_a_completed_summary_confirmed() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mut failures = Vec::new();
+    for (command, complete, incomplete, passed) in [
+        ("vitest", "Tests 1 passed (1)", "Tests 1 failed (", 1),
+        ("jest", "Tests: 1 passed, 1 total", "Tests:", 1),
+        ("pytest", "7 passed in 0.10s", "=== 3 failed, 7 pa", 7),
+        ("pytest", "7 passed in 0.10s", "7 passed in", 7),
+    ] {
+        for body in [
+            format!("{complete}\n{incomplete}\n"),
+            format!("{incomplete}\n{complete}\n"),
+            format!("{incomplete}\n"),
+        ] {
+            fs::write(log.path(), format!("$ {command}\n{body}")).unwrap();
+            let output = repository.check_with(
+                &format!("Ran `{command}`, {passed} passed\n"),
+                &["--log", &format!("{command}={}", log.path().display())],
+                &[],
+            );
+            if output.status.code() != Some(3) {
+                failures.push(format!("{body:?}: {}", stdout(&output)));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn all_file_actions_refuse_submodule_entries() {
     let repository = Repository::new();
     repository.write("a.txt", "fixture\n");

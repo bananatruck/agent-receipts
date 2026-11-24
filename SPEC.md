@@ -107,6 +107,7 @@ Errors contribute to the failure count.
 The JavaScript parser accepts one `Tests` line with pipe-separated categories and a parenthesized total, or one `Tests:` line with comma-separated categories and a final total.
 It recognizes passed, failed, skipped, and todo categories and checks their sum against the total.
 Suite and file totals do not count as test totals.
+Summary candidates are counted before format validation, so a truncated additional summary makes counts not checkable.
 Recognized runner failures, including failed suites or compilation failures, contradict a test-success statement even if its passed count matches.
 Matching passed counts and the explicitly reported failure count confirm the statement.
 An omitted failure count means zero failures.
