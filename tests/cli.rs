@@ -65,7 +65,18 @@ impl Repository {
     }
 
     fn check_with(&self, report: &str, args: &[&str], environment: &[(&str, &str)]) -> Output {
+        self.check_from(report, args, environment, Path::new("."))
+    }
+
+    fn check_from(
+        &self,
+        report: &str,
+        args: &[&str],
+        environment: &[(&str, &str)],
+        invocation: &Path,
+    ) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_agent-receipts"));
+        command.current_dir(invocation);
         if !args.contains(&"--repo") {
             command.arg("--repo").arg(self.path());
         }
@@ -393,20 +404,26 @@ fn unreadable_git_evidence_is_unknown_instead_of_a_contradiction() {
 #[test]
 fn rejects_unpaired_quotes_and_does_not_execute_report_text() {
     let repository = Repository::new();
+    let invocation = tempfile::tempdir().unwrap();
     repository.write("README.md", "fixture\n");
     let hash = repository.commit();
-    let output = repository.check(&format!(
-        "File `README.md exists\nFile README.md` exists\nCommit `{hash} exists\n\
+    let output = repository.check_from(
+        &format!(
+            "File `README.md exists\nFile README.md` exists\nCommit `{hash} exists\n\
          Committed as {hash}`\nCommitted as {hash} if tests pass\n\
          File `$(touch OWNED)` exists\n"
-    ));
+        ),
+        &[],
+        &[],
+        invocation.path(),
+    );
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     for line in 1..=5 {
         assert_verdict(&output, line, "unsupported", "not checkable");
     }
     assert_verdict(&output, 6, "file at HEAD", "contradicted");
     assert!(!repository.path().join("OWNED").exists());
-    assert!(!Path::new("OWNED").exists());
+    assert!(!invocation.path().join("OWNED").exists());
 }
 
 #[test]
