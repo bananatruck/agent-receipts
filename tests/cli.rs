@@ -1611,3 +1611,94 @@ fn pushed_hashes_reject_prefix_collisions_across_object_types() {
         );
     }
 }
+
+#[test]
+fn real_vitest_runs_separate_counted_failures_from_errors_outside_the_counts() {
+    // Captured from Vitest 3.2.4 with colors disabled, stdout and stderr merged;
+    // only the project path on the RUN line was replaced. Its Type Errors line
+    // counts failed type tests, which the Tests line already includes. Failed
+    // suites and unhandled errors are outside the Tests count.
+    let repository = Repository::new();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vitest-3.2.4");
+    for (fixture, command, counts, verdict) in [
+        (
+            "assertion",
+            "npx vitest run",
+            "0 passed, 1 failed",
+            "confirmed",
+        ),
+        ("pass", "npx vitest run", "1 passed", "confirmed"),
+        (
+            "type-test",
+            "npx vitest run --typecheck",
+            "0 passed, 1 failed",
+            "confirmed",
+        ),
+        (
+            "type-test",
+            "npx vitest run --typecheck",
+            "0 passed",
+            "contradicted",
+        ),
+        (
+            "type-and-assertion",
+            "npx vitest run --typecheck",
+            "0 passed, 2 failed",
+            "confirmed",
+        ),
+        (
+            "type-pass",
+            "npx vitest run --typecheck",
+            "1 passed",
+            "confirmed",
+        ),
+        (
+            "type-outside-test",
+            "npx vitest run --typecheck",
+            "1 passed",
+            "contradicted",
+        ),
+        (
+            "source-type-error",
+            "npx vitest run --typecheck",
+            "1 passed",
+            "contradicted",
+        ),
+        (
+            "failed-suite",
+            "npx vitest run",
+            "0 passed, 1 failed",
+            "contradicted",
+        ),
+        (
+            "failed-hook",
+            "npx vitest run",
+            "0 passed, 1 failed",
+            "contradicted",
+        ),
+        (
+            "unhandled-error",
+            "npx vitest run",
+            "1 passed",
+            "contradicted",
+        ),
+    ] {
+        let log = fixtures.join(format!("{fixture}.log"));
+        let mapping = format!("{command}={}", log.display());
+        let report = format!("Ran `{command}`, {counts}\n");
+        let expected = if verdict == "confirmed" { 0 } else { 1 };
+        let output = repository.check_with(&report, &["--log", &mapping], &[]);
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "{fixture}: {}",
+            stdout(&output)
+        );
+        assert_verdict(&output, 1, "test counts in supplied log", verdict);
+
+        let output = repository.check_with(&report, &["--log", &mapping, "--json"], &[]);
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["exit_code"], expected, "{fixture}");
+        assert_eq!(json["statements"][0]["verdict"], verdict, "{fixture}");
+    }
+}

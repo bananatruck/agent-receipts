@@ -58,20 +58,15 @@ impl Logs {
                     return Err("log must contain exactly one matching $ COMMAND record");
                 }
                 let body = &text[records[0].0..];
-                let parser: fn(&str) -> Option<Counts> =
-                    match command.split_whitespace().collect::<Vec<_>>().as_slice() {
-                        ["cargo", "test", ..] => cargo_summary,
-                        ["pytest", ..] => pytest_summary,
-                        ["vitest" | "jest", ..] | ["npx", "vitest" | "jest", ..] => {
-                            javascript_summary
-                        }
-                        _ => return Err("unsupported command family"),
-                    };
-                let counts = parser(body);
-                if runner_failure(command, body, failed.unwrap_or(0) > 0) {
-                    return Ok(None);
+                let runner = Runner::of(command).ok_or("unsupported command family")?;
+                let diagnostic = body.lines().filter_map(|l| diagnostic(runner, l)).max();
+                match diagnostic {
+                    Some(Diagnostic::Abnormal) => return Ok(None),
+                    Some(Diagnostic::Failure) if failed.unwrap_or(0) == 0 => return Ok(None),
+                    _ => {}
                 }
-                counts
+                runner
+                    .summary(body)
                     .map(Some)
                     .ok_or("no unambiguous supported completed test summary")
             });
@@ -463,47 +458,161 @@ fn javascript_summary(text: &str) -> Option<Counts> {
     (sum == total).then_some(counts)
 }
 
-fn runner_failure(command: &str, text: &str, reported_failures: bool) -> bool {
-    // Abnormal exits have an unprefixed cause even when other suites counted
-    // assertion failures. Normal assertion exits use 101 and omit that cause.
-    static CARGO_FATAL: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^(?:error: could not compile|(?:error: )?process didn't exit successfully:)")
-            .unwrap()
-    });
-    static CARGO_FAILED: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^(?:error: (?:test failed|[0-9]+ targets? failed)|test result: FAILED\.)")
-            .unwrap()
-    });
-    static JAVASCRIPT_FATAL: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^(?:(?:Type )?Errors\s+[1-9][0-9]* errors?\b|Unhandled Errors\b)").unwrap()
-    });
-    static JAVASCRIPT_FAILED: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^(?:Test Suites:|Test Files)\s+.*\b[1-9][0-9]* failed\b").unwrap()
-    });
-    let mut words = command.split_whitespace();
-    let runner = match words.next() {
-        Some("npx") => words.next(),
-        runner => runner,
-    };
-    text.lines().map(str::trim).any(|line| match runner {
-        Some("cargo") => {
-            CARGO_FATAL.is_match(line) || (!reported_failures && CARGO_FAILED.is_match(line))
+// How a supplied log becomes a verdict, for every supported runner.
+//
+// 1. The command decides the runner. Each runner reads only its own lines.
+// 2. A diagnostic line from the table below is either Abnormal or Failure.
+//    Abnormal: the runner reports an error that its test counts do not
+//    contain (a compile error, an abnormal exit, a suite that failed to load
+//    or set up, a collection, internal or unhandled error). No count can
+//    account for it, so the statement is contradicted.
+//    Failure: an ordinary failed-test marker. Its tests are inside the
+//    counts, so it contradicts only a statement that reports no failures.
+// 3. Otherwise the runner's parser must find one complete summary: one
+//    final count line for pytest, Vitest and Jest, and for Cargo every
+//    announced suite completed with a matching header and summary. Its
+//    counts confirm or contradict the statement.
+// 4. Missing, partial, conflicting or malformed runner lines are not
+//    checkable. A diagnostic look-alike in ordinary output can only stop a
+//    confirmation, never cause one, so diagnostics match the trimmed line.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Runner {
+    Cargo,
+    Pytest,
+    Vitest,
+    Jest,
+}
+
+impl Runner {
+    fn of(command: &str) -> Option<Self> {
+        match command.split_whitespace().collect::<Vec<_>>().as_slice() {
+            ["cargo", "test", ..] => Some(Self::Cargo),
+            ["pytest", ..] => Some(Self::Pytest),
+            ["vitest", ..] | ["npx", "vitest", ..] => Some(Self::Vitest),
+            ["jest", ..] | ["npx", "jest", ..] => Some(Self::Jest),
+            _ => None,
         }
-        Some("pytest") => {
-            line.starts_with("INTERNALERROR>")
-                || line
-                    .trim_matches('_')
-                    .trim()
-                    .starts_with("ERROR collecting ")
+    }
+
+    fn summary(self, body: &str) -> Option<Counts> {
+        match self {
+            Self::Cargo => cargo_summary(body),
+            Self::Pytest => pytest_summary(body),
+            Self::Vitest | Self::Jest => javascript_summary(body),
         }
-        Some("vitest" | "jest") => {
-            JAVASCRIPT_FATAL.is_match(line)
-                || (runner == Some("jest")
-                    && line.strip_prefix('●').unwrap_or(line).trim_start()
-                        == "Test suite failed to run")
-                || (!reported_failures
-                    && (JAVASCRIPT_FAILED.is_match(line) || line.starts_with("FAIL ")))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Diagnostic {
+    Failure,
+    Abnormal,
+}
+
+use Diagnostic::{Abnormal, Failure};
+use Runner::{Cargo, Jest, Pytest, Vitest};
+
+// Vitest and Jest share one summary parser, so their diagnostics apply to
+// both; a look-alike line can only stop a confirmation.
+const JAVASCRIPT: &[Runner] = &[Vitest, Jest];
+
+#[rustfmt::skip]
+const RULES: &[(&[Runner], Diagnostic, &str)] = &[
+    // Cargo 1.85 src/cargo/ops/cargo_test.rs. Abnormal exits print an
+    // unprefixed cause even when other suites counted assertion failures;
+    // ordinary assertion exits use status 101 and omit that cause.
+    (&[Cargo], Abnormal, r"^error: could not compile"),
+    (&[Cargo], Abnormal, r"^(?:error: )?process didn't exit successfully:"),
+    (&[Cargo], Failure, r"^error: (?:test failed|[0-9]+ targets? failed)"),
+    (&[Cargo], Failure, r"^test result: FAILED\."),
+    // pytest: internal errors, and collection errors whose tests were never
+    // counted, plain or as an underscore-decorated heading.
+    (&[Pytest], Abnormal, r"^INTERNALERROR>"),
+    (&[Pytest], Abnormal, r"^_*\s*ERROR collecting "),
+    // Jest: a suite that failed to run, optionally with its bullet.
+    (&[Jest], Abnormal, r"^(?:●\s*)?Test suite failed to run$"),
+    // Vitest 3.2.4 packages/vitest/src/node/reporters/base.ts and logger.ts.
+    // Errors counts unhandled errors. Banners sit inside dividers of U+23AF:
+    // Failed Suites holds suites that failed to load or whose hooks failed,
+    // Unhandled Errors and Source Errors hold errors outside any test.
+    (JAVASCRIPT, Abnormal, r"^Errors\s+[1-9][0-9]* errors?\b"),
+    (JAVASCRIPT, Abnormal, r"^⎯*\s*(?:Unhandled Errors|Source Errors|Failed Suites [1-9][0-9]*)\b"),
+    // Type Errors counts failed type tests, a subset of the Tests line's
+    // failures (base.ts filters `tests` for typecheck tests with errors), so
+    // it is an ordinary failure. Type errors outside a test are reported as
+    // a failed suite or an unhandled source error instead.
+    (JAVASCRIPT, Failure, r"^Type Errors\s+[1-9][0-9]* (?:failed|errors?)\b"),
+    (JAVASCRIPT, Failure, r"^(?:Test Suites:|Test Files)\s+.*\b[1-9][0-9]* failed\b"),
+    (JAVASCRIPT, Failure, r"^FAIL "),
+];
+
+fn diagnostic(runner: Runner, line: &str) -> Option<Diagnostic> {
+    static COMPILED: LazyLock<Vec<(&[Runner], Diagnostic, Regex)>> = LazyLock::new(|| {
+        RULES
+            .iter()
+            .map(|&(runners, kind, pattern)| (runners, kind, Regex::new(pattern).unwrap()))
+            .collect()
+    });
+    let line = line.trim();
+    COMPILED
+        .iter()
+        .filter(|(runners, _, pattern)| runners.contains(&runner) && pattern.is_match(line))
+        .map(|&(_, kind, _)| kind)
+        .max()
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn diagnostics_follow_each_runners_rules() {
+        const NONE: &[Runner] = &[];
+        // Each line is checked under every runner: it is a diagnostic of the
+        // expected kind for the listed runners and ordinary output otherwise.
+        #[rustfmt::skip]
+        let rows: &[(&str, &[Runner], Option<Diagnostic>)] = &[
+            ("error: could not compile `fixture` (lib test) due to 1 previous error", &[Cargo], Some(Abnormal)),
+            ("error: process didn't exit successfully: `target/debug/deps/x-1` (signal: 11)", &[Cargo], Some(Abnormal)),
+            ("  process didn't exit successfully: `target/debug/deps/x-1` (exit status: 4)", &[Cargo], Some(Abnormal)),
+            ("error: test failed, to rerun pass `--lib`", &[Cargo], Some(Failure)),
+            ("error: 2 targets failed:", &[Cargo], Some(Failure)),
+            ("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s", &[Cargo], Some(Failure)),
+            ("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s", NONE, None),
+            ("INTERNALERROR> RuntimeError: fixture", &[Pytest], Some(Abnormal)),
+            ("ERROR collecting tests/test_fixture.py", &[Pytest], Some(Abnormal)),
+            ("_____ ERROR collecting tests/test_fixture.py _____", &[Pytest], Some(Abnormal)),
+            ("_____ test_assertion _____", NONE, None),
+            ("  ● Test suite failed to run", &[Jest], Some(Abnormal)),
+            ("Test suite failed to run", &[Jest], Some(Abnormal)),
+            ("     Errors  1 error", JAVASCRIPT, Some(Abnormal)),
+            ("Errors 2 errors", JAVASCRIPT, Some(Abnormal)),
+            ("⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯", JAVASCRIPT, Some(Abnormal)),
+            ("Unhandled Errors", JAVASCRIPT, Some(Abnormal)),
+            ("⎯⎯⎯⎯⎯⎯ Source Errors ⎯⎯⎯⎯⎯⎯", JAVASCRIPT, Some(Abnormal)),
+            ("⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯", JAVASCRIPT, Some(Abnormal)),
+            ("⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯", NONE, None),
+            ("Type Errors  1 failed", JAVASCRIPT, Some(Failure)),
+            ("Type Errors 1 error", JAVASCRIPT, Some(Failure)),
+            ("Type Errors  no errors", NONE, None),
+            (" Test Files  2 failed (2)", JAVASCRIPT, Some(Failure)),
+            ("Test Suites: 1 failed, 1 total", JAVASCRIPT, Some(Failure)),
+            (" FAIL  math.test.ts > adds", JAVASCRIPT, Some(Failure)),
+            ("      Tests  1 failed (1)", NONE, None),
+            (" Test Files  1 passed (1)", NONE, None),
+            ("Vitest caught 1 unhandled error during the test run.", NONE, None),
+            ("Running query (cached)", NONE, None),
+            ("FAILED to connect, retrying", NONE, None),
+        ];
+        for &(line, runners, expected) in rows {
+            for runner in [Cargo, Pytest, Vitest, Jest] {
+                let want = if runners.contains(&runner) {
+                    expected
+                } else {
+                    None
+                };
+                assert_eq!(diagnostic(runner, line), want, "{runner:?} {line:?}");
+            }
         }
-        _ => false,
-    })
+    }
 }

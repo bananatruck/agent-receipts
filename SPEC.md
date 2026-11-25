@@ -122,7 +122,14 @@ Matching passed counts and the explicitly reported failure count confirm the sta
 An omitted failure count means zero failures.
 When a statement reports failures, ordinary test-failure markers alone cannot resolve missing or ambiguous counts, which stay not checkable.
 Differing counts contradict the statement.
+Each runner diagnostic is either abnormal or an ordinary failure, from one rule table in src/logs.rs that cites the runner source for each line shape.
+An abnormal diagnostic reports an error that the runner's test counts do not contain, so it contradicts the statement whatever counts it reports.
+An ordinary failure marker belongs to tests inside the counts, so it contradicts only a statement that reports no failures.
 Crashes, compilation errors, internal errors, and unhandled errors cannot be accounted for by a test failure count and contradict the statement.
+Vitest's `Errors N error` line and its `Unhandled Errors`, `Source Errors`, and `Failed Suites N` banners are abnormal, including banners inside divider characters.
+A failed suite covers a test file that failed to load or a hook failure that skipped its tests, which the Tests count does not include as failures.
+Vitest's `Type Errors N failed` line counts type tests that are already failed tests in the Tests line, so it is an ordinary failure and matching counts can confirm.
+A type error outside any test appears as a failed suite or an unhandled source error instead, and contradicts.
 Cargo's `process didn't exit successfully:` cause contradicts independently of counted assertion failures, with or without an `error:` prefix.
 Ordinary assertion failures exit with status 101 and omit that cause, so matching complete counts can confirm.
 Jest suite-loading errors also contradict a statement that accurately reports assertion failure counts.
