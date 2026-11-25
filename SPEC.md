@@ -102,6 +102,8 @@ The small cargo parser sums completed `test result: ok.` or `test result: FAILED
 A summary must include passed, failed, ignored, measured, filtered-out, and elapsed-seconds fields.
 Each summary requires a preceding `running N tests` header whose count equals passed plus failed plus ignored plus measured.
 A summary without a header, a mismatched total, a duplicate summary, or a suite-start line without a completed summary makes counts not checkable.
+Cargo runner announcements are recognized by unit-test labels, Rust source paths, or executable parentheses, including recognizable partial announcements.
+Ordinary stdout such as `Running initialization` does not start a suite, while output resembling runner status is treated conservatively.
 The pytest parser accepts exactly one final count list followed by `in <seconds>s`, optionally surrounded by equals signs or followed by a duration annotation.
 It recognizes passed, failed, errors, skipped, deselected, expected-failure, unexpected-pass, and warning categories using their standard summary tokens.
 Errors contribute to the failure count.

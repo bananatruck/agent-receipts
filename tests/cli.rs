@@ -1133,6 +1133,59 @@ fn normal_stdout_is_not_an_extra_test_summary() {
 }
 
 #[test]
+fn cargo_stdout_does_not_announce_a_suite_but_runner_status_does() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let command = "cargo test -- --nocapture";
+    let announcement = "Running unittests src/lib.rs (target/debug/deps/fixture-1234)";
+    let summary = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s";
+    for body in [
+        format!("{announcement}\nrunning 1 test\nRunning initialization\n{summary}\n"),
+        format!("Running initialization\n{announcement}\nrunning 1 test\n{summary}\n"),
+        format!("{announcement}\nrunning 1 test\n{summary}\nRunning initialization\n"),
+    ] {
+        fs::write(log.path(), format!("$ {command}\n{body}")).unwrap();
+        let output = repository.check_with(
+            &format!("Ran `{command}`, 1 passed\n"),
+            &["--log", &format!("{command}={}", log.path().display())],
+            &[],
+        );
+        assert_eq!(output.status.code(), Some(0), "{}", stdout(&output));
+        assert_verdict(&output, 1, "test counts in supplied log", "confirmed");
+    }
+
+    for next_suite in [
+        "Running unittests src/other.rs (target/debug/deps/other-1234)",
+        "Running tests/other.rs (target/debug/deps/other-1234)",
+        "Running checks/custom (target/debug/deps/custom-1234)",
+        "Doc-tests fixture",
+        "Running unittests src/other.rs",
+        "Running tests/other.rs",
+        "Running checks/custom (",
+        "Running initialization (phase one)",
+    ] {
+        for body in [
+            format!("{announcement}\nrunning 1 test\n{next_suite}\n{summary}\n"),
+            format!("{announcement}\nrunning 1 test\n{summary}\n{next_suite}\n"),
+        ] {
+            fs::write(log.path(), format!("$ {command}\n{body}")).unwrap();
+            let output = repository.check_with(
+                &format!("Ran `{command}`, 1 passed\n"),
+                &["--log", &format!("{command}={}", log.path().display())],
+                &[],
+            );
+            assert_eq!(
+                output.status.code(),
+                Some(3),
+                "{body:?}: {}",
+                stdout(&output)
+            );
+            assert_verdict(&output, 1, "test counts in supplied log", "not checkable");
+        }
+    }
+}
+
+#[test]
 fn incomplete_summaries_cannot_leave_a_completed_summary_confirmed() {
     let repository = Repository::new();
     let log = tempfile::NamedTempFile::new().unwrap();

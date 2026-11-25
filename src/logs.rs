@@ -107,6 +107,8 @@ pub fn cargo_summary(text: &str) -> Option<Counts> {
     });
     static RUNNING: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"^running ([0-9]+) tests?$").unwrap());
+    static ANNOUNCEMENT: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^Running (?:unittests(?: |$)|.*\.rs(?: |$)|.* \()").unwrap());
     let mut total = Counts {
         passed: 0,
         failed: 0,
@@ -115,7 +117,7 @@ pub fn cargo_summary(text: &str) -> Option<Counts> {
     let mut announced = false;
     let mut running = None;
     for line in text.lines().map(str::trim) {
-        if line.starts_with("Running ") || line.starts_with("Doc-tests ") {
+        if ANNOUNCEMENT.is_match(line) || line.starts_with("Doc-tests ") {
             if announced || running.is_some() {
                 return None;
             }
