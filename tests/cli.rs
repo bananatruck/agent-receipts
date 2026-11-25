@@ -2314,3 +2314,65 @@ fn clean_snapshots_preserve_conversion_ignores_split_indexes_and_worktrees() {
     );
     assert_eq!(output.status.code(), Some(1), "{output:?}");
 }
+
+#[test]
+fn separate_log_arguments_allow_equals_in_commands_and_paths() {
+    let repository = Repository::new();
+    let logs = tempfile::tempdir().unwrap();
+    let path = logs.path().join("build=debug/run=1.log");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, "$ pytest --maxfail=1\n1 passed in 0.10s\n").unwrap();
+    let other = logs.path().join("other.log");
+    fs::write(&other, "$ jest\nTests: 1 passed, 1 total\n").unwrap();
+    let report = "Ran `pytest --maxfail=1`, 1 passed\nRan `jest`, 1 passed\n";
+    for json in [false, true] {
+        let mut args = vec![
+            "--log-file",
+            "pytest --maxfail=1",
+            path.to_str().unwrap(),
+            "--log-file",
+            "jest",
+            other.to_str().unwrap(),
+        ];
+        if json {
+            args.push("--json");
+        }
+        let output = repository.check_with(report, &args, &[]);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        if json {
+            let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(doc["summary"]["confirmed"], 2);
+        } else {
+            assert_verdict(&output, 1, "test counts in supplied log", "confirmed");
+            assert_verdict(&output, 2, "test counts in supplied log", "confirmed");
+        }
+    }
+    let mapping = format!("jest={}", other.display());
+    let output = repository.check_with(
+        report,
+        &[
+            "--log",
+            &mapping,
+            "--log-file",
+            "pytest --maxfail=1",
+            path.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let output = repository.check_with(
+        report,
+        &[
+            "--log",
+            &mapping,
+            "--log-file",
+            "jest",
+            other.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate log"));
+    let output = repository.check_with(report, &["--log-file", "pytest"], &[]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+}

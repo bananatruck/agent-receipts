@@ -63,7 +63,8 @@ No fetch or other network request occurs.
 
 Use repeatable `--log 'COMMAND=PATH'` flags for captured UTF-8 command logs.
 The final equals sign separates the command from the path, so arguments such as `--maxfail=1` work.
-Log paths containing equals signs are unsupported; supply the log through a path without equals signs.
+For paths containing equals signs, use two separate arguments: `--log-file 'pytest --maxfail=1' 'build=debug/run.log'`.
+Both log flags are repeatable and can be combined.
 Each log must contain exactly one `$ COMMAND` record on its own line, followed by the captured output.
 The record, flag, and report must use exactly the same command, including its flags and spaces.
 The supported families are `cargo test`, `pytest`, `vitest`, `jest`, `npx vitest`, and `npx jest`, with optional arguments.

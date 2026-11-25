@@ -14,13 +14,25 @@ pub struct Counts {
 pub struct Logs(BTreeMap<String, String>);
 
 impl Logs {
-    pub fn read(values: &[String]) -> Result<Self, String> {
+    pub fn read(values: &[String], files: &[String]) -> Result<Self, String> {
         let mut logs = BTreeMap::new();
-        for value in values {
-            let (command, path) = value
-                .rsplit_once('=')
-                .filter(|(c, p)| !c.is_empty() && !p.is_empty())
-                .ok_or("--log requires COMMAND=PATH, for example --log 'cargo test=run.txt'")?;
+        let mappings = values
+            .iter()
+            .map(|value| {
+                value
+                    .rsplit_once('=')
+                    .ok_or("--log requires COMMAND=PATH, for example --log 'cargo test=run.txt'")
+            })
+            .chain(
+                files
+                    .chunks_exact(2)
+                    .map(|pair| Ok((pair[0].as_str(), pair[1].as_str()))),
+            );
+        for mapping in mappings {
+            let (command, path) = mapping?;
+            if command.is_empty() || path.is_empty() {
+                return Err("log command and path must both be nonempty".into());
+            }
             let contents =
                 fs::read_to_string(path).map_err(|e| format!("cannot read log {path}: {e}"))?;
             if logs

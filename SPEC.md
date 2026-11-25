@@ -92,7 +92,9 @@ Shallow history cannot confirm absence from ancestry.
 
 Repeat `--log 'COMMAND=PATH'` for distinct commands.
 The final equals sign is the separator, allowing equals signs in command arguments.
-Log paths containing equals signs are unsupported.
+For paths containing equals signs, repeat `--log-file COMMAND PATH` with two separate arguments instead.
+For example, `--log-file 'pytest --maxfail=1' 'build=debug/run.log'`.
+Both log flags can be combined.
 Paths resolve from the invocation directory, independently of `--repo`.
 Each log is UTF-8 text and must contain exactly one command record, written as `$ COMMAND` on its own line before the output.
 The record, flag, and report command must match exactly, including flags and spaces.
@@ -150,7 +152,7 @@ Truncation between completed suites without a visible next-suite start cannot be
 ```text
 agent-receipts [--repo PATH] [--report PATH|-]
                [--base COMMIT] [--remote-ref refs/remotes/NAME/BRANCH]
-               [--log COMMAND=PATH]... [--json]
+               [--log COMMAND=PATH]... [--log-file COMMAND PATH]... [--json]
 agent-receipts --help
 agent-receipts --version
 ```
