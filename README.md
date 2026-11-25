@@ -18,6 +18,7 @@ printf 'Tree is clean\n' | ./target/release/agent-receipts --repo .
 `--report -` reads stdin and is the default.
 Use one statement per line, optionally with a Markdown bullet and a final period.
 Blank lines and recognized fence delimiter lines are ignored.
+Inline-looking tilde openers remain unsupported rows and open a code context.
 Headings remain visible as not checkable, so a claim written in a heading cannot silently pass CI.
 Quoted code and unsupported wording stay not checkable.
 

@@ -21,12 +21,15 @@ Markdown ATX headings remain unsupported rows and receive not checkable.
 Fenced code, including list-item fences, and lines indented to column four or beyond using spaces or tabs are quoted material and cannot confirm statements.
 List-marker padding of five or more columns is also quoted code.
 Padding tabs advance to four-column stops from the marker's original column, including leading indentation.
-A fence marker indented to column four or beyond cannot close an active fence.
+A fence marker indented four columns or more beyond its container cannot close an active fence.
+An unclosed list-item fence ends when its list item ends.
+An unclosed top-level fence continues to the end of the report.
 Closing fences accept only ASCII spaces and tabs around the delimiter.
 Backtick fence info strings cannot contain backticks.
-Tilde fence info strings accept single tildes; inline spans with repeated tildes remain unsupported statement rows.
+Tilde fence info strings accept repeated tildes.
+Inline-looking tilde openers remain visible as unsupported rows, and their following content remains quoted code.
 Inline multi-backtick or tilde spans remain unsupported rows.
-Fence delimiter lines produce no verdict.
+Other fence delimiter lines produce no verdict.
 Other unsupported lines retain their source line number and receive not checkable.
 Negations, conditionals, or statements embedded in longer prose are unsupported unless listed below.
 No report text is executed.

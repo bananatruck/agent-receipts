@@ -2112,7 +2112,7 @@ fn fences_distinguish_ascii_closers_and_single_tilde_info() {
         ("~~~ text title=\"a~b\"\nTree is clean\n~~~\n", 0),
         ("~~~ text title=\"a~b~c\"\nTree is clean\n~~~\n", 0),
         ("``` text title=\"a`b\"\nTree is clean\n", 1),
-        ("~~~cargo test~~~ failed\nTree is clean\n", 1),
+        ("~~~cargo test~~~ failed\nTree is clean\n", 0),
     ] {
         for json in [false, true] {
             let args = if json { vec!["--json"] } else { vec![] };
@@ -2474,4 +2474,62 @@ fn vitest_type_failures_cannot_exceed_failed_test_counts() {
             }
         }
     }
+}
+
+#[test]
+fn fences_follow_list_containers_and_allow_repeated_tilde_info() {
+    let repository = Repository::new();
+    repository.write("a.txt", "fixture\n");
+    repository.commit();
+    let mut failures = Vec::new();
+    for (report, quoted) in [
+        ("- ```\nTree is clean\n", false),
+        ("- ```\n  example\n\nTree is clean\n", false),
+        ("1. ~~~\n   example\nTree is clean\n", false),
+        ("10. ```\n    example\n- Tree is clean\n", false),
+        ("- item\n  ```\n  example\nTree is clean\n", false),
+        ("- ```\n  example\n    ```\nTree is clean\n", false),
+        ("- ```\n  Tree is clean\n", true),
+        (
+            "- outer\n  - ```\n    example\n  ```\n  example\nTree is clean\n",
+            false,
+        ),
+        ("```\n- example\nTree is clean\n", true),
+        ("```\n\nTree is clean\n", true),
+        ("~~~ text title=\"a~~b\"\nTree is clean\n", true),
+        ("~~~ text title=\"a~~~b\"\nTree is clean\n", true),
+        ("~~~cargo test~~~ failed\nTree is clean\n", true),
+        ("prefix ~~~cargo test~~~ failed\nTree is clean\n", false),
+    ] {
+        let tree_line = report
+            .lines()
+            .position(|line| line.contains("Tree is clean"))
+            .unwrap()
+            + 1;
+        for json in [false, true] {
+            let args = if json { vec!["--json"] } else { vec![] };
+            let output = repository.check_with(report, &args, &[]);
+            let verdict = if quoted { "not checkable" } else { "confirmed" };
+            let correct = if json {
+                let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                let row = doc["statements"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| row["line"] == tree_line)
+                    .unwrap();
+                row["verdict"] == verdict && doc["exit_code"] == output.status.code().unwrap()
+            } else {
+                let text = stdout(&output);
+                text.lines().any(|line| {
+                    line.starts_with(&format!("{tree_line}\t"))
+                        && line.contains(&format!("\t{verdict}\t"))
+                })
+            };
+            if !correct {
+                failures.push(format!("{report:?}, json={json}: {}", stdout(&output)));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
