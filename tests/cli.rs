@@ -1889,3 +1889,46 @@ fn inexact_renames_ignore_repository_detection_limits() {
         assert_verdict(&output, line, "committed path action", "confirmed");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn clean_checks_reinspect_flags_set_during_status() {
+    use std::os::unix::fs::PermissionsExt;
+    let repository = Repository::new();
+    repository.write("tracked.txt", "before\n");
+    repository.commit();
+    repository.write("tracked.txt", "after\n");
+    let helpers = tempfile::tempdir().unwrap();
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|path| path.join("git"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let wrapper = helpers.path().join("git");
+    fs::write(&wrapper, "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = status ]; then\n    \"$REAL_GIT\" -C \"$FIXTURE_REPO\" update-index \"$INDEX_FLAG\" tracked.txt || exit\n  fi\ndone\nexec \"$REAL_GIT\" \"$@\"\n").unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        helpers.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    for flag in ["--skip-worktree", "--assume-unchanged"] {
+        repository.git(&[
+            "update-index",
+            "--no-skip-worktree",
+            "--no-assume-unchanged",
+            "tracked.txt",
+        ]);
+        let output = repository.check_with(
+            "Tree is clean\n",
+            &[],
+            &[
+                ("PATH", &path),
+                ("REAL_GIT", real_git.to_str().unwrap()),
+                ("FIXTURE_REPO", repository.path().to_str().unwrap()),
+                ("INDEX_FLAG", flag),
+            ],
+        );
+        assert_eq!(output.status.code(), Some(3), "{flag}: {output:?}");
+        assert_verdict(&output, 1, "working tree clean", "not checkable");
+    }
+}

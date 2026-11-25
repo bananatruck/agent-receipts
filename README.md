@@ -194,6 +194,8 @@ The program uses fixed grammar rather than arbitrary natural-language interpreta
 It cannot prove code quality, intent, authorship, report completeness, evidence authenticity, or when tests ran.
 An endpoint diff cannot reveal every path edited during a session.
 A clean-tree check excludes ignored files and describes only its observation time.
+Index visibility is checked before and after status.
+This catches flags left set during status but cannot detect every transient concurrent change.
 Configured clean or process filters, hidden index entries marked assume-unchanged or skip-worktree, and submodule worktrees make cleanliness not checkable.
 File actions on submodule entries are also not checkable.
 File checks inspect stored HEAD entries without following intermediate symlinks.
