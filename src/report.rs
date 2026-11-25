@@ -74,13 +74,27 @@ pub struct Statement {
     pub claim: Claim,
 }
 
+#[derive(Clone, Copy)]
+struct Fence {
+    marker: char,
+    length: usize,
+    container_indent: usize,
+}
+
 pub fn parse(text: &str) -> Vec<Statement> {
-    let mut fence = None;
+    let mut fence: Option<Fence> = None;
+    let mut list_indents = Vec::new();
     text.lines()
         .enumerate()
         .filter_map(|(index, raw)| {
             let source = raw.trim();
-            let indented = indentation(raw) >= 4;
+            let columns = indentation(raw);
+            let indented = columns >= 4;
+            // CommonMark 0.31.2 section 4.5: an unclosed fence ends at its
+            // container boundary. Blank lines alone do not end a list item.
+            if !source.is_empty() && fence.is_some_and(|f| columns < f.container_indent) {
+                fence = None;
+            }
             let content = PREFIX.replace(source, "");
             let prefix = &source[..source.len() - content.len()];
             let marker_width = prefix.trim_end().len();
@@ -96,6 +110,14 @@ pub fn parse(text: &str) -> Vec<Statement> {
                 })
                 - marker_end;
             let list_code = padding >= 5;
+            if fence.is_none() && !source.is_empty() {
+                while list_indents.last().is_some_and(|&indent| columns < indent) {
+                    list_indents.pop();
+                }
+                if !prefix.is_empty() && !list_code {
+                    list_indents.push(marker_end + padding);
+                }
+            }
             let delimiter = if fence.is_none() {
                 content.as_ref()
             } else {
@@ -103,16 +125,27 @@ pub fn parse(text: &str) -> Vec<Statement> {
                 // ASCII spaces and tabs, not Unicode whitespace.
                 raw.trim_start_matches([' ', '\t'])
             };
-            if !indented && !list_code {
+            let container_indent = fence.map_or(list_indents.last().copied().unwrap_or(0), |f| {
+                f.container_indent
+            });
+            if columns.saturating_sub(container_indent) < 4 && !list_code {
                 if let Some((marker, length)) = fence_marker(delimiter) {
                     match fence {
                         None => {
-                            fence = Some((marker, length));
-                            return None;
+                            fence = Some(Fence {
+                                marker,
+                                length,
+                                container_indent,
+                            });
+                            // Keep inline-looking tilde openers visible as
+                            // unsupported rows while preserving their code context.
+                            if marker != '~' || !delimiter[length..].contains("~~") {
+                                return None;
+                            }
                         }
-                        Some((opening, minimum))
-                            if marker == opening
-                                && length >= minimum
+                        Some(opening)
+                            if marker == opening.marker
+                                && length >= opening.length
                                 && delimiter[length..].trim_matches([' ', '\t']).is_empty() =>
                         {
                             fence = None;
@@ -162,11 +195,11 @@ fn fence_marker(line: &str) -> Option<(char, usize)> {
     }
     let length = line.chars().take_while(|&value| value == marker).count();
     let info = &line[length..];
-    // Backtick info strings cannot contain backticks. Tilde info may contain
-    // single tildes; repeated tildes stay visible as unsupported inline spans.
+    // CommonMark 0.31.2 section 4.5 restricts backticks only. Tilde info
+    // strings may contain any number of tildes.
     let valid_info = match marker {
         '`' => !info.contains('`'),
-        '~' => !info.contains("~~"),
+        '~' => true,
         _ => unreachable!(),
     };
     (length >= 3 && valid_info).then_some((marker, length))

@@ -41,6 +41,7 @@ impl Repository {
             .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
             .env_remove("GIT_NAMESPACE")
             .env_remove("GIT_CONFIG_PARAMETERS")
+            .env_remove("GIT_CONFIG")
             .env("GIT_CONFIG_COUNT", "0")
             .output()
             .unwrap();
@@ -90,12 +91,11 @@ impl Repository {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        process
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(report.as_bytes())
-            .unwrap();
+        if let Err(error) = process.stdin.take().unwrap().write_all(report.as_bytes()) {
+            // Argument errors can close stdin before the report is written.
+            // Keep the exit status and stderr available to the calling test.
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "{error}");
+        }
         process.wait_with_output().unwrap()
     }
 }
@@ -2112,7 +2112,7 @@ fn fences_distinguish_ascii_closers_and_single_tilde_info() {
         ("~~~ text title=\"a~b\"\nTree is clean\n~~~\n", 0),
         ("~~~ text title=\"a~b~c\"\nTree is clean\n~~~\n", 0),
         ("``` text title=\"a`b\"\nTree is clean\n", 1),
-        ("~~~cargo test~~~ failed\nTree is clean\n", 1),
+        ("~~~cargo test~~~ failed\nTree is clean\n", 0),
     ] {
         for json in [false, true] {
             let args = if json { vec!["--json"] } else { vec![] };
@@ -2148,4 +2148,513 @@ fn fences_distinguish_ascii_closers_and_single_tilde_info() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn scope_checks_skip_rename_detection() {
+    use std::os::unix::fs::PermissionsExt;
+    let repository = Repository::new();
+    repository.write("old.txt", "fixture\n");
+    let base = repository.commit();
+    repository.git(&["mv", "old.txt", "new.txt"]);
+    repository.commit();
+    let helpers = tempfile::tempdir().unwrap();
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|path| path.join("git"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let wrapper = helpers.path().join("git");
+    let marker = helpers.path().join("diff-options");
+    fs::write(&wrapper, "#!/bin/sh\nfor arg do\n  case $arg in\n    --no-renames|--find-renames=50%|-l0) printf '%s\\n' \"$arg\" >> \"$DIFF_MARKER\" ;;\n  esac\ndone\nexec \"$REAL_GIT\" \"$@\"\n").unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        helpers.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let output = repository.check_with(
+        "Only touched old.txt, new.txt\nDid not modify old.txt\nRenamed old.txt to new.txt\nAdded new.txt\nDeleted old.txt\n",
+        &["--base", &base],
+        &[("PATH", &path), ("REAL_GIT", real_git.to_str().unwrap()), ("DIFF_MARKER", marker.to_str().unwrap())],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_verdict(&output, 1, "committed diff scope", "confirmed");
+    assert_verdict(&output, 2, "committed diff scope", "contradicted");
+    for line in 3..=5 {
+        assert_verdict(&output, line, "committed path action", "confirmed");
+    }
+    assert_eq!(
+        fs::read_to_string(marker).unwrap(),
+        "--no-renames\n--no-renames\n--find-renames=50%\n-l0\n--no-renames\n--no-renames\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_status_cannot_execute_filters_added_after_preflight() {
+    use std::os::unix::fs::PermissionsExt;
+    let repository = Repository::new();
+    repository.write(".gitattributes", "tracked.txt filter=probe\n");
+    repository.write("tracked.txt", "before\n");
+    repository.commit();
+    repository.write("tracked.txt", "after!\n");
+    let helpers = tempfile::tempdir().unwrap();
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|path| path.join("git"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let wrapper = helpers.path().join("git");
+    let marker = helpers.path().join("filter-executed");
+    let reached = helpers.path().join("status-reached");
+    fs::write(&wrapper, "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = status ]; then\n    \"$REAL_GIT\" -C \"$FIXTURE_REPO\" config \"filter.probe.$FILTER_KIND\" 'printf executed > \"$FILTER_MARKER\"; cat' || exit\n    printf reached > \"$STATUS_MARKER\" || exit\n  fi\ndone\nexec \"$REAL_GIT\" \"$@\"\n").unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        helpers.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let config = repository.path().join(".git/config");
+    let original_config = fs::read(&config).unwrap();
+    for kind in ["clean", "process"] {
+        fs::write(&config, &original_config).unwrap();
+        let output = repository.check_with(
+            "Tree is clean\n",
+            &[],
+            &[
+                ("PATH", &path),
+                ("REAL_GIT", real_git.to_str().unwrap()),
+                ("FIXTURE_REPO", repository.path().to_str().unwrap()),
+                ("FILTER_KIND", kind),
+                ("FILTER_MARKER", marker.to_str().unwrap()),
+                ("STATUS_MARKER", reached.to_str().unwrap()),
+            ],
+        );
+        assert_eq!(fs::read_to_string(&reached).unwrap(), "reached");
+        assert!(!marker.exists(), "{kind} executed: {output:?}");
+        assert_ne!(output.status.code(), Some(0), "{kind}: {output:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_status_rejects_index_flags_set_and_cleared_during_status() {
+    use std::os::unix::fs::PermissionsExt;
+    let repository = Repository::new();
+    repository.write("tracked.txt", "before\n");
+    repository.commit();
+    repository.write("tracked.txt", "after!\n");
+    let helpers = tempfile::tempdir().unwrap();
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|path| path.join("git"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let wrapper = helpers.path().join("git");
+    let marker = helpers.path().join("status-reached");
+    fs::write(&wrapper, "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = status ]; then\n    \"$REAL_GIT\" -C \"$FIXTURE_REPO\" update-index \"$INDEX_FLAG\" tracked.txt || exit\n    \"$REAL_GIT\" \"$@\"\n    result=$?\n    \"$REAL_GIT\" -C \"$FIXTURE_REPO\" update-index --no-assume-unchanged tracked.txt || exit\n    \"$REAL_GIT\" -C \"$FIXTURE_REPO\" update-index --no-skip-worktree tracked.txt || exit\n    printf '%s\\n' \"$INDEX_FLAG\" >> \"$STATUS_MARKER\" || exit\n    exit \"$result\"\n  fi\ndone\nexec \"$REAL_GIT\" \"$@\"\n").unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        helpers.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    for flag in ["--assume-unchanged", "--skip-worktree"] {
+        fs::write(&marker, "").unwrap();
+        let output = repository.check_with(
+            "Tree is clean\n",
+            &[],
+            &[
+                ("PATH", &path),
+                ("REAL_GIT", real_git.to_str().unwrap()),
+                ("FIXTURE_REPO", repository.path().to_str().unwrap()),
+                ("INDEX_FLAG", flag),
+                ("STATUS_MARKER", marker.to_str().unwrap()),
+            ],
+        );
+        assert_eq!(fs::read_to_string(&marker).unwrap(), format!("{flag}\n"));
+        assert_eq!(output.status.code(), Some(3), "{flag}: {output:?}");
+        assert_verdict(&output, 1, "working tree clean", "not checkable");
+    }
+}
+
+#[test]
+fn clean_snapshots_preserve_conversion_ignores_split_indexes_and_worktrees() {
+    let repository = Repository::new();
+    repository.git(&["config", "core.autocrlf", "true"]);
+    repository.write("tracked.txt", "line\r\n");
+    repository.commit();
+    repository.write(".git/info/exclude", "ignored.txt\n");
+    repository.write("ignored.txt", "ignored\n");
+    repository.git(&["update-index", "--split-index"]);
+    assert_eq!(repository.git(&["status", "--porcelain=v1"]), "");
+    let output = repository.check("Tree is clean\n");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    repository.write("tracked.txt", "edit\r\n");
+    let output = repository.check("Tree is clean\n");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+
+    let linked = tempfile::tempdir().unwrap();
+    repository.git(&[
+        "worktree",
+        "add",
+        "--detach",
+        linked.path().to_str().unwrap(),
+    ]);
+    let output = repository.check_with(
+        "Tree is clean\n",
+        &["--repo", linked.path().to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    fs::write(linked.path().join("tracked.txt"), "changed\n").unwrap();
+    let output = repository.check_with(
+        "Tree is clean\n",
+        &["--repo", linked.path().to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+}
+
+#[test]
+fn separate_log_arguments_allow_equals_in_commands_and_paths() {
+    let repository = Repository::new();
+    let logs = tempfile::tempdir().unwrap();
+    let path = logs.path().join("build=debug/run=1.log");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, "$ pytest --maxfail=1\n1 passed in 0.10s\n").unwrap();
+    let other = logs.path().join("other.log");
+    fs::write(&other, "$ jest\nTests: 1 passed, 1 total\n").unwrap();
+    let report = "Ran `pytest --maxfail=1`, 1 passed\nRan `jest`, 1 passed\n";
+    for json in [false, true] {
+        let mut args = vec![
+            "--log-file",
+            "pytest --maxfail=1",
+            path.to_str().unwrap(),
+            "--log-file",
+            "jest",
+            other.to_str().unwrap(),
+        ];
+        if json {
+            args.push("--json");
+        }
+        let output = repository.check_with(report, &args, &[]);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        if json {
+            let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(doc["summary"]["confirmed"], 2);
+        } else {
+            assert_verdict(&output, 1, "test counts in supplied log", "confirmed");
+            assert_verdict(&output, 2, "test counts in supplied log", "confirmed");
+        }
+    }
+    let mapping = format!("jest={}", other.display());
+    let output = repository.check_with(
+        report,
+        &[
+            "--log",
+            &mapping,
+            "--log-file",
+            "pytest --maxfail=1",
+            path.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let output = repository.check_with(
+        report,
+        &[
+            "--log",
+            &mapping,
+            "--log-file",
+            "jest",
+            other.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate log"));
+    let output = repository.check_with(report, &["--log-file", "pytest"], &[]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+}
+
+#[test]
+fn jest_suite_failures_must_be_accounted_for_by_failed_tests() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    for command in ["jest", "npx jest"] {
+        for (suites, verdict, exit) in [
+            ("2 failed, 2 total", "contradicted", 1),
+            ("1 failed, 1 total", "confirmed", 0),
+            ("1 failed, 2 total", "not checkable", 3),
+            ("2 failed, 1 total", "not checkable", 3),
+            ("2 failed,", "not checkable", 3),
+            (
+                "18446744073709551616 failed, 18446744073709551616 total",
+                "not checkable",
+                3,
+            ),
+            (
+                "1 failed, 1 total\nTest Suites: 2 failed, 2 total",
+                "not checkable",
+                3,
+            ),
+        ] {
+            fs::write(
+                log.path(),
+                format!("$ {command}\nTest Suites: {suites}\nTests: 1 failed, 1 total\n"),
+            )
+            .unwrap();
+            let mapping = format!("{command}={}", log.path().display());
+            for json in [false, true] {
+                let mut args = vec!["--log", &mapping];
+                if json {
+                    args.push("--json");
+                }
+                let output = repository.check_with(
+                    &format!("Ran `{command}`, 0 passed, 1 failed\n"),
+                    &args,
+                    &[],
+                );
+                assert_eq!(
+                    output.status.code(),
+                    Some(exit),
+                    "{command} {suites}: {output:?}"
+                );
+                if json {
+                    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                    assert_eq!(doc["statements"][0]["verdict"], verdict);
+                } else {
+                    assert_verdict(&output, 1, "test counts in supplied log", verdict);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn vitest_type_failures_cannot_exceed_failed_test_counts() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    for command in ["vitest", "npx vitest"] {
+        for (types, verdict, exit) in [
+            ("2 failed", "not checkable", 3),
+            ("1 failed", "confirmed", 0),
+            ("no errors", "confirmed", 0),
+            ("18446744073709551616 failed", "not checkable", 3),
+            ("2 failed extra", "not checkable", 3),
+            ("1 failed\nType Errors 2 failed", "not checkable", 3),
+        ] {
+            fs::write(
+                log.path(),
+                format!("$ {command}\nTests 1 failed (1)\nType Errors {types}\n"),
+            )
+            .unwrap();
+            let mapping = format!("{command}={}", log.path().display());
+            for json in [false, true] {
+                let mut args = vec!["--log", &mapping];
+                if json {
+                    args.push("--json");
+                }
+                let output = repository.check_with(
+                    &format!("Ran `{command}`, 0 passed, 1 failed\n"),
+                    &args,
+                    &[],
+                );
+                assert_eq!(
+                    output.status.code(),
+                    Some(exit),
+                    "{command} {types}: {output:?}"
+                );
+                if json {
+                    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                    assert_eq!(doc["statements"][0]["verdict"], verdict);
+                } else {
+                    assert_verdict(&output, 1, "test counts in supplied log", verdict);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn fences_follow_list_containers_and_allow_repeated_tilde_info() {
+    let repository = Repository::new();
+    repository.write("a.txt", "fixture\n");
+    repository.commit();
+    let mut failures = Vec::new();
+    for (report, quoted) in [
+        ("- ```\nTree is clean\n", false),
+        ("- ```\n  example\n\nTree is clean\n", false),
+        ("1. ~~~\n   example\nTree is clean\n", false),
+        ("10. ```\n    example\n- Tree is clean\n", false),
+        ("- item\n  ```\n  example\nTree is clean\n", false),
+        ("- ```\n  example\n    ```\nTree is clean\n", false),
+        ("- ```\n  Tree is clean\n", true),
+        (
+            "- outer\n  - ```\n    example\n  ```\n  example\nTree is clean\n",
+            false,
+        ),
+        ("```\n- example\nTree is clean\n", true),
+        ("```\n\nTree is clean\n", true),
+        ("~~~ text title=\"a~~b\"\nTree is clean\n", true),
+        ("~~~ text title=\"a~~~b\"\nTree is clean\n", true),
+        ("~~~cargo test~~~ failed\nTree is clean\n", true),
+        ("prefix ~~~cargo test~~~ failed\nTree is clean\n", false),
+    ] {
+        let tree_line = report
+            .lines()
+            .position(|line| line.contains("Tree is clean"))
+            .unwrap()
+            + 1;
+        for json in [false, true] {
+            let args = if json { vec!["--json"] } else { vec![] };
+            let output = repository.check_with(report, &args, &[]);
+            let verdict = if quoted { "not checkable" } else { "confirmed" };
+            let correct = if json {
+                let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                let row = doc["statements"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| row["line"] == tree_line)
+                    .unwrap();
+                row["verdict"] == verdict && doc["exit_code"] == output.status.code().unwrap()
+            } else {
+                let text = stdout(&output);
+                text.lines().any(|line| {
+                    line.starts_with(&format!("{tree_line}\t"))
+                        && line.contains(&format!("\t{verdict}\t"))
+                })
+            };
+            if !correct {
+                failures.push(format!("{report:?}, json={json}: {}", stdout(&output)));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn fixture_git_commands_ignore_inherited_config_files() {
+    if std::env::var_os("FIXTURE_GIT_CONFIG_REPLAY").is_some() {
+        let repository = Repository::new();
+        repository.write("tracked.txt", "fixture\n");
+        repository.commit();
+        return;
+    }
+    let config = tempfile::NamedTempFile::new().unwrap();
+    let contents = "# preserve this unrelated config file\n";
+    fs::write(config.path(), contents).unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "fixture_git_commands_ignore_inherited_config_files",
+            "--nocapture",
+        ])
+        .env("GIT_CONFIG", config.path())
+        .env("FIXTURE_GIT_CONFIG_REPLAY", "1")
+        .output()
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(config.path()).unwrap(),
+        contents,
+        "fixture commands changed the inherited configuration"
+    );
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+fn argument_errors_remain_observable_when_stdin_closes_early() {
+    let repository = Repository::new();
+    let output = repository.check_with(
+        &"Tree is clean\n".repeat(100_000),
+        &["--unrecognized-option"],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument"));
+}
+
+#[test]
+fn malformed_type_counts_cannot_determine_zero_failure_claims() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    for types in [
+        "2 failed extra",
+        "18446744073709551616 failed",
+        "2 failed (",
+    ] {
+        fs::write(
+            log.path(),
+            format!("$ vitest\nTests 1 passed (1)\nType Errors {types}\n"),
+        )
+        .unwrap();
+        let mapping = format!("vitest={}", log.path().display());
+        let output = repository.check_with("Ran `vitest`, 1 passed\n", &["--log", &mapping], &[]);
+        assert_eq!(output.status.code(), Some(3), "{types}: {output:?}");
+        assert_verdict(&output, 1, "test counts in supplied log", "not checkable");
+    }
+}
+
+/// Git trusts an index entry's stat data unless the entry is "racily clean": modified no earlier than
+/// the index file was written, when it compares contents instead. A same-size edit in the same second
+/// as the last index write is caught only that way, so the private index used for status must keep the
+/// live index's modification time; a fresh copy would be newer than its entries and report the edit
+/// as clean. Commit and edit right after a second boundary, then check in the next second.
+#[test]
+fn a_same_second_same_size_edit_is_not_reported_clean() {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    let wait_for_next_second = || {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        std::thread::sleep(
+            Duration::from_nanos(1_000_000_000 - u64::from(now.subsec_nanos()))
+                + Duration::from_millis(20),
+        );
+    };
+    let repository = Repository::new();
+    wait_for_next_second();
+    repository.write("tracked.txt", "before\n");
+    repository.commit();
+    repository.write("tracked.txt", "after!\n");
+    wait_for_next_second();
+    let output = repository.check("Tree is clean\n");
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert_verdict(&output, 1, "working tree clean", "contradicted");
+}
+
+/// A malformed suite, file or type summary line is runner evidence that cannot be read: it makes the
+/// statement not checkable for either JavaScript runner, rather than being skipped as ordinary output.
+#[test]
+fn malformed_javascript_summary_lines_are_not_checkable_for_either_runner() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    for (command, malformed, summary) in [
+        (
+            "jest",
+            "Type Errors 2 failed extra",
+            "Tests: 1 passed, 1 total",
+        ),
+        ("jest", "Test Files garbage", "Tests: 1 passed, 1 total"),
+        ("vitest", "Test Suites: garbage", "Tests 1 passed (1)"),
+        ("vitest", "Type Errors 2 failed extra", "Tests 1 passed (1)"),
+        (
+            "npx vitest",
+            "Test Files 1 failed and more",
+            "Tests 1 passed (1)",
+        ),
+    ] {
+        fs::write(log.path(), format!("$ {command}\n{malformed}\n{summary}\n")).unwrap();
+        let output = repository.check_with(
+            &format!("Ran `{command}`, 1 passed\n"),
+            &["--log", &format!("{command}={}", log.path().display())],
+            &[],
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(3),
+            "{command} {malformed:?}: {}",
+            stdout(&output)
+        );
+        assert_verdict(&output, 1, "test counts in supplied log", "not checkable");
+    }
 }

@@ -21,12 +21,15 @@ Markdown ATX headings remain unsupported rows and receive not checkable.
 Fenced code, including list-item fences, and lines indented to column four or beyond using spaces or tabs are quoted material and cannot confirm statements.
 List-marker padding of five or more columns is also quoted code.
 Padding tabs advance to four-column stops from the marker's original column, including leading indentation.
-A fence marker indented to column four or beyond cannot close an active fence.
+A fence marker indented four columns or more beyond its container cannot close an active fence.
+An unclosed list-item fence ends when its list item ends.
+An unclosed top-level fence continues to the end of the report.
 Closing fences accept only ASCII spaces and tabs around the delimiter.
 Backtick fence info strings cannot contain backticks.
-Tilde fence info strings accept single tildes; inline spans with repeated tildes remain unsupported statement rows.
+Tilde fence info strings accept repeated tildes.
+Inline-looking tilde openers remain visible as unsupported rows, and their following content remains quoted code.
 Inline multi-backtick or tilde spans remain unsupported rows.
-Fence delimiter lines produce no verdict.
+Other fence delimiter lines produce no verdict.
 Other unsupported lines retain their source line number and receive not checkable.
 Negations, conditionals, or statements embedded in longer prose are unsupported unless listed below.
 No report text is executed.
@@ -64,7 +67,8 @@ File existence concerns HEAD, not an uncommitted working copy.
 Missing HEAD makes file, diff, and default-HEAD ancestry evidence unavailable.
 Clean-tree checks include staged, unstaged, and untracked changes, and exclude ignored files.
 Configured clean or process filters, assume-unchanged or skip-worktree index flags, and submodule worktrees make cleanliness not checkable.
-Index preflight checks inspect the whole repository even when --repo selects a subdirectory.
+Status and index visibility checks inspect a private index copy for the whole repository, even when --repo selects a subdirectory.
+Changes to the live index identity, size, or timestamps during the check make cleanliness not checkable.
 They describe the observation time rather than a past state.
 
 `--base COMMIT` resolves a local commit and compares its tree with HEAD's tree.
@@ -91,7 +95,9 @@ Shallow history cannot confirm absence from ancestry.
 
 Repeat `--log 'COMMAND=PATH'` for distinct commands.
 The final equals sign is the separator, allowing equals signs in command arguments.
-Log paths containing equals signs are unsupported.
+For paths containing equals signs, repeat `--log-file COMMAND PATH` with two separate arguments instead.
+For example, `--log-file 'pytest --maxfail=1' 'build=debug/run.log'`.
+Both log flags can be combined.
 Paths resolve from the invocation directory, independently of `--repo`.
 Each log is UTF-8 text and must contain exactly one command record, written as `$ COMMAND` on its own line before the output.
 The record, flag, and report command must match exactly, including flags and spaces.
@@ -125,7 +131,9 @@ Matching passed counts and the explicitly reported failure count confirm the sta
 An omitted failure count means zero failures.
 When a statement reports failures, ordinary test-failure markers alone cannot resolve missing or ambiguous counts, which stay not checkable.
 Differing counts contradict the statement.
-Each runner diagnostic is either abnormal or an ordinary failure, from one rule table in src/logs.rs that cites the runner source for each line shape.
+One rule table in src/logs.rs holds line diagnostics and comparisons of complete counts, with a runner source for each rule.
+Diagnostics distinguish abnormal errors, inconsistent evidence, and ordinary failures.
+Inconsistent evidence makes the statement not checkable.
 An abnormal diagnostic reports an error that the runner's test counts do not contain, so it contradicts the statement whatever counts it reports.
 An ordinary failure marker belongs to tests inside the counts, so it contradicts only a statement that reports no failures.
 Crashes, compilation errors, internal errors, and unhandled errors cannot be accounted for by a test failure count and contradict the statement.
@@ -133,11 +141,16 @@ Vitest's `Errors N error` line and its `Unhandled Errors`, `Source Errors`, and 
 A failed suite covers a test file that failed to load or a hook failure that skipped its tests, which the Tests count does not include as failures.
 Vitest writes those banners to stderr, so a stdout-only capture can lack them; a `Test Files` failed total above the `Tests` failed total still shows a file that failed outside its tests, because every failed test fails its own file, and contradicts the statement.
 Vitest's `Type Errors N failed` line counts type tests that are already failed tests in the Tests line, so it is an ordinary failure and matching counts can confirm.
+A type-failure count above the failed-test count is inconsistent and not checkable.
+Malformed or duplicate type summaries also stay not checkable.
 A type error outside any test appears as a failed suite or an unhandled source error instead, and contradicts.
 Cargo's `process didn't exit successfully:` cause contradicts independently of counted assertion failures, with or without an `error:` prefix.
 Cargo's `could not execute process ... (never executed)` cause, printed when a test binary cannot be launched, also contradicts independently of counted assertion failures, because that target counted nothing.
 Ordinary assertion failures exit with status 101 and omit that cause, so matching complete counts can confirm.
 Jest suite-loading errors also contradict a statement that accurately reports assertion failure counts.
+A validated Jest failed-suite count above the failed-test count proves a suite execution error and contradicts even without its banner.
+Malformed or duplicate Jest suite summaries stay not checkable.
+A malformed `Test Files`, `Test Suites:` or `Type Errors` line makes the statement not checkable for both Vitest and Jest, whichever runner normally prints it.
 Pytest collection-error headings, plain or decorated with underscores, contradict independently of the reported failure count.
 Ordinary stdout beginning with FAIL is not a Cargo runner status.
 Cargo diagnostics apply only to Cargo commands, pytest diagnostics only to pytest, and JavaScript diagnostics only to Vitest or Jest.
@@ -149,7 +162,7 @@ Truncation between completed suites without a visible next-suite start cannot be
 ```text
 agent-receipts [--repo PATH] [--report PATH|-]
                [--base COMMIT] [--remote-ref refs/remotes/NAME/BRANCH]
-               [--log COMMAND=PATH]... [--json]
+               [--log COMMAND=PATH]... [--log-file COMMAND PATH]... [--json]
 agent-receipts --help
 agent-receipts --version
 ```
@@ -184,7 +197,9 @@ Git subprocesses define repository facts without adding a Git library.
 Arguments are passed without a shell, optional index locks and filesystem monitor hooks are disabled, and lazy object fetching is disabled.
 An empty Git protocol allowlist denies all transports, including direct promisor fetches.
 Replacement objects, global and system configuration, and inherited configuration overrides are disabled.
-Status is refused before execution when clean or process filters are configured or submodules are present.
+Status uses a private Git directory with resolved content and path comparison settings, copied index and metadata, and no filter definitions or configuration includes.
+Configured clean or process filters and submodules make cleanliness not checkable.
+Later live configuration changes cannot introduce filters into the status subprocess.
 Repository-location environment variables are removed so `--repo` chooses the checked repository.
 External diff drivers and text conversion are disabled for diff checks.
 The command-line parser, fixed grammar, and JSON serializer use established libraries listed in Cargo.toml.

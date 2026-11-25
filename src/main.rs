@@ -14,7 +14,7 @@ use serde::Serialize;
 #[derive(Parser)]
 #[command(version, about = "Check report statements against local Git evidence")]
 #[command(
-    after_help = "Examples:\n  agent-receipts --repo . --report examples/synthetic-report.md\n  printf 'Tree is clean\\n' | agent-receipts --repo .\n\nExit codes: 0 all confirmed, 1 contradicted, 2 input error, 3 not checkable."
+    after_help = "Examples:\n  agent-receipts --repo . --report examples/synthetic-report.md\n  printf 'Tree is clean\\n' | agent-receipts --repo .\n  agent-receipts --log-file 'pytest --maxfail=1' 'build=debug/run.log' --report report.md\n\nExit codes: 0 all confirmed, 1 contradicted, 2 input error, 3 not checkable."
 )]
 struct Args {
     /// Working repository to inspect
@@ -23,6 +23,9 @@ struct Args {
     /// Captured UTF-8 log associated with COMMAND, repeatable
     #[arg(long = "log", value_name = "COMMAND=PATH")]
     logs: Vec<String>,
+    /// Captured log as two arguments, allowing equals signs in PATH, repeatable
+    #[arg(long = "log-file", num_args = 2, value_names = ["COMMAND", "PATH"])]
+    log_files: Vec<String>,
     /// Existing local tracking ref, for example refs/remotes/origin/main
     #[arg(long)]
     remote_ref: Option<String>,
@@ -88,7 +91,7 @@ fn run(args: Args) -> Result<u8, String> {
             .map_err(|error| format!("cannot read report {}: {error}", args.report.display()))?
     };
     let repository = Repository::open(args.repo)?;
-    let logs = logs::Logs::read(&args.logs)?;
+    let logs = logs::Logs::read(&args.logs, &args.log_files)?;
     let mut output = io::BufWriter::new(io::stdout().lock());
     let mut rows = Vec::new();
     let mut confirmed = 0;

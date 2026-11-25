@@ -18,6 +18,7 @@ printf 'Tree is clean\n' | ./target/release/agent-receipts --repo .
 `--report -` reads stdin and is the default.
 Use one statement per line, optionally with a Markdown bullet and a final period.
 Blank lines and recognized fence delimiter lines are ignored.
+Inline-looking tilde openers remain unsupported rows and open a code context.
 Headings remain visible as not checkable, so a claim written in a heading cannot silently pass CI.
 Quoted code and unsupported wording stay not checkable.
 
@@ -63,7 +64,8 @@ No fetch or other network request occurs.
 
 Use repeatable `--log 'COMMAND=PATH'` flags for captured UTF-8 command logs.
 The final equals sign separates the command from the path, so arguments such as `--maxfail=1` work.
-Log paths containing equals signs are unsupported; supply the log through a path without equals signs.
+For paths containing equals signs, use two separate arguments: `--log-file 'pytest --maxfail=1' 'build=debug/run.log'`.
+Both log flags are repeatable and can be combined.
 Each log must contain exactly one `$ COMMAND` record on its own line, followed by the captured output.
 The record, flag, and report must use exactly the same command, including its flags and spaces.
 The supported families are `cargo test`, `pytest`, `vitest`, `jest`, `npx vitest`, and `npx jest`, with optional arguments.
@@ -85,6 +87,9 @@ Pytest collection errors, including underscore-decorated headings, contradict ev
 Vitest failed suites, unhandled errors, and source errors contradict even matching failure counts.
 In a stdout-only Vitest capture without those banners, more failed test files than failed tests also contradicts.
 Vitest type-test failures are already in its Tests count, so matching counts can confirm a statement that reports them.
+More type failures than failed tests are inconsistent evidence and stay not checkable.
+For Jest, more failed suites than failed tests shows a suite execution error and contradicts the statement.
+Malformed or duplicate suite and type summaries stay not checkable, for Vitest and Jest alike.
 Diagnostics are recognized only for the corresponding command family.
 The output states that a supplied log is evidence only of its contents, not authentic execution in this checkout.
 
@@ -194,8 +199,8 @@ The program uses fixed grammar rather than arbitrary natural-language interpreta
 It cannot prove code quality, intent, authorship, report completeness, evidence authenticity, or when tests ran.
 An endpoint diff cannot reveal every path edited during a session.
 A clean-tree check excludes ignored files and describes only its observation time.
-Index visibility is checked before and after status.
-This catches flags left set during status but cannot detect every transient concurrent change.
+Status and index visibility checks use a private copy of the index.
+Changes to the live index identity, size, or timestamps during the check make cleanliness not checkable.
 Configured clean or process filters, hidden index entries marked assume-unchanged or skip-worktree, and submodule worktrees make cleanliness not checkable.
 File actions on submodule entries are also not checkable.
 File checks inspect stored HEAD entries without following intermediate symlinks.
@@ -207,7 +212,9 @@ The program trusts the installed Git executable, its configuration parser, and t
 It reads repository configuration but disables replacement objects, filesystem monitor hooks, external diff drivers, text conversion, and lazy fetching.
 An empty Git protocol allowlist also blocks direct promisor fetches.
 Global and system Git configuration and inherited configuration overrides are excluded.
-It checks filter configuration before status and refuses filtered repositories or submodule worktrees instead of running their configured programs.
+Status uses a private Git directory with resolved comparison settings and no filter definitions or configuration includes.
+Filters configured before the snapshot and submodule worktrees make cleanliness not checkable.
+Later changes to the live configuration cannot add executable filters to the status subprocess.
 These precautions do not make Git a sandbox for corrupted repositories or prove that local objects and refs are authentic.
 Some truncation between completed test suites is indistinguishable from a shorter complete log.
 Repository evidence is not atomic if another process changes it during verification.

@@ -14,13 +14,25 @@ pub struct Counts {
 pub struct Logs(BTreeMap<String, String>);
 
 impl Logs {
-    pub fn read(values: &[String]) -> Result<Self, String> {
+    pub fn read(values: &[String], files: &[String]) -> Result<Self, String> {
         let mut logs = BTreeMap::new();
-        for value in values {
-            let (command, path) = value
-                .rsplit_once('=')
-                .filter(|(c, p)| !c.is_empty() && !p.is_empty())
-                .ok_or("--log requires COMMAND=PATH, for example --log 'cargo test=run.txt'")?;
+        let mappings = values
+            .iter()
+            .map(|value| {
+                value
+                    .rsplit_once('=')
+                    .ok_or("--log requires COMMAND=PATH, for example --log 'cargo test=run.txt'")
+            })
+            .chain(
+                files
+                    .chunks_exact(2)
+                    .map(|pair| Ok((pair[0].as_str(), pair[1].as_str()))),
+            );
+        for mapping in mappings {
+            let (command, path) = mapping?;
+            if command.is_empty() || path.is_empty() {
+                return Err("log command and path must both be nonempty".into());
+            }
             let contents =
                 fs::read_to_string(path).map_err(|e| format!("cannot read log {path}: {e}"))?;
             if logs
@@ -66,6 +78,7 @@ impl Logs {
                     .max(runner.unaccounted_failures(body));
                 match diagnostic {
                     Some(Diagnostic::Abnormal) => return Ok(None),
+                    Some(Diagnostic::Inconsistent) => return Err("runner counts are inconsistent"),
                     Some(Diagnostic::Failure) if failed.unwrap_or(0) == 0 => return Ok(None),
                     _ => {}
                 }
@@ -471,22 +484,15 @@ fn totaled_items(items: &str, total: u64, separator: &str) -> Option<Counts> {
 // How a supplied log becomes a verdict, for every supported runner.
 //
 // 1. The command decides the runner. Each runner reads only its own lines.
-// 2. A diagnostic line from the table below is either Abnormal or Failure.
-//    Abnormal: the runner reports an error that its test counts do not
-//    contain (a compile error, a test binary that could not be launched or
-//    exited abnormally, a suite that failed to load or set up, a collection,
-//    internal or unhandled error). No count can account for it, so the
-//    statement is contradicted. One Abnormal rule spans two lines and sits
-//    beside the table: a Vitest failed-file total above the failed-test total.
-//    Failure: an ordinary failed-test marker. Its tests are inside the
-//    counts, so it contradicts only a statement that reports no failures.
-// 3. Otherwise the runner's parser must find one complete summary: one
-//    final count line for pytest, Vitest and Jest, and for Cargo every
-//    announced suite completed with a matching header and summary. Its
-//    counts confirm or contradict the statement.
-// 4. Missing, partial, conflicting or malformed runner lines are not
-//    checkable. A diagnostic look-alike in ordinary output can only stop a
-//    confirmation, never cause one, so diagnostics match the trimmed line.
+// 2. The table holds both line patterns and comparisons of complete counts.
+//    Abnormal means an error outside the test counts, contradicting any claim.
+//    Inconsistent counts are not checkable. Failure is inside the test counts,
+//    so it contradicts only a statement reporting no failures.
+// 3. Otherwise require one complete summary: one final count line for pytest,
+//    Vitest and Jest, or matching headers and summaries for every Cargo suite.
+//    Complete counts confirm or contradict the statement.
+// 4. Missing, partial, conflicting or malformed runner lines are not checkable.
+//    Diagnostic look-alikes can only stop confirmation; lines are trimmed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Runner {
     Cargo,
@@ -512,28 +518,42 @@ impl Runner {
             Self::Pytest => pytest_summary(body),
             Self::Vitest => {
                 vitest_file_summary(body)?;
+                vitest_type_summary(body)?;
                 javascript_summary(body)
             }
-            Self::Jest => javascript_summary(body),
+            Self::Jest => {
+                jest_suite_summary(body)?;
+                javascript_summary(body)
+            }
         }
     }
 
-    // The one Abnormal rule that needs two lines; see vitest_files_outside_tests.
     fn unaccounted_failures(self, body: &str) -> Option<Diagnostic> {
-        match self {
-            Self::Vitest => vitest_files_outside_tests(body).then_some(Abnormal),
-            Self::Cargo | Self::Pytest | Self::Jest => None,
-        }
+        RULES
+            .iter()
+            .filter_map(|&(runners, kind, pattern)| match pattern {
+                Run(check) if runners.contains(&self) && check(body) => Some(kind),
+                _ => None,
+            })
+            .max()
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Diagnostic {
     Failure,
+    Inconsistent,
     Abnormal,
 }
 
-use Diagnostic::{Abnormal, Failure};
+use Diagnostic::{Abnormal, Failure, Inconsistent};
+
+#[derive(Clone, Copy)]
+enum RulePattern {
+    Line(&'static str),
+    Run(fn(&str) -> bool),
+}
+use RulePattern::{Line, Run};
 use Runner::{Cargo, Jest, Pytest, Vitest};
 
 // Vitest and Jest share one summary parser, so their diagnostics apply to
@@ -541,54 +561,71 @@ use Runner::{Cargo, Jest, Pytest, Vitest};
 const JAVASCRIPT: &[Runner] = &[Vitest, Jest];
 
 #[rustfmt::skip]
-const RULES: &[(&[Runner], Diagnostic, &str)] = &[
+const RULES: &[(&[Runner], Diagnostic, RulePattern)] = &[
     // Cargo 1.85 src/cargo/ops/cargo_test.rs. Abnormal exits print an
     // unprefixed cause even when other suites counted assertion failures;
     // ordinary assertion exits use status 101 and omit that cause.
-    (&[Cargo], Abnormal, r"^error: could not compile"),
-    (&[Cargo], Abnormal, r"^(?:error: )?process didn't exit successfully:"),
+    (&[Cargo], Abnormal, Line(r"^error: could not compile")),
+    (&[Cargo], Abnormal, Line(r"^(?:error: )?process didn't exit successfully:")),
     // Cargo 1.85 crates/cargo-util/src/process_error.rs: a test binary that
     // could not be spawned prints `could not execute process CMD (never
     // executed)` as its cause, and its tests are in no count.
-    (&[Cargo], Abnormal, r"^(?:error: )?could not execute process\b"),
-    (&[Cargo], Failure, r"^error: (?:test failed|[0-9]+ targets? failed)"),
-    (&[Cargo], Failure, r"^test result: FAILED\."),
+    (&[Cargo], Abnormal, Line(r"^(?:error: )?could not execute process\b")),
+    (&[Cargo], Failure, Line(r"^error: (?:test failed|[0-9]+ targets? failed)")),
+    (&[Cargo], Failure, Line(r"^test result: FAILED\.")),
     // pytest: internal errors, and collection errors whose tests were never
     // counted, plain or as an underscore-decorated heading.
-    (&[Pytest], Abnormal, r"^INTERNALERROR>"),
-    (&[Pytest], Abnormal, r"^_*\s*ERROR collecting "),
+    (&[Pytest], Abnormal, Line(r"^INTERNALERROR>")),
+    (&[Pytest], Abnormal, Line(r"^_*\s*ERROR collecting ")),
     // Jest: a suite that failed to run, optionally with its bullet.
-    (&[Jest], Abnormal, r"^(?:●\s*)?Test suite failed to run$"),
+    (&[Jest], Abnormal, Line(r"^(?:●\s*)?Test suite failed to run$")),
     // Vitest 3.2.4 packages/vitest/src/node/reporters/base.ts and logger.ts.
     // Errors counts unhandled errors. Banners sit inside dividers of U+23AF:
     // Failed Suites holds suites that failed to load or whose hooks failed,
     // Unhandled Errors and Source Errors hold errors outside any test.
-    (JAVASCRIPT, Abnormal, r"^Errors\s+[1-9][0-9]* errors?\b"),
-    (JAVASCRIPT, Abnormal, r"^⎯*\s*(?:Unhandled Errors|Source Errors|Failed Suites [1-9][0-9]*)\b"),
+    (JAVASCRIPT, Abnormal, Line(r"^Errors\s+[1-9][0-9]* errors?\b")),
+    (JAVASCRIPT, Abnormal, Line(r"^⎯*\s*(?:Unhandled Errors|Source Errors|Failed Suites [1-9][0-9]*)\b")),
     // Type Errors counts failed type tests, a subset of the Tests line's
     // failures (base.ts filters `tests` for typecheck tests with errors), so
     // it is an ordinary failure. Type errors outside a test are reported as
     // a failed suite or an unhandled source error instead.
-    (JAVASCRIPT, Failure, r"^Type Errors\s+[1-9][0-9]* (?:failed|errors?)\b"),
-    // A failed Test Files total is ordinary on its own. Above the Tests line's
-    // failed total it is Abnormal; that compares two lines, so it is
-    // Runner::unaccounted_failures, with its source in
-    // vitest_files_outside_tests.
-    (JAVASCRIPT, Failure, r"^(?:Test Suites:|Test Files)\s+.*\b[1-9][0-9]* failed\b"),
-    (JAVASCRIPT, Failure, r"^FAIL "),
+    (JAVASCRIPT, Failure, Line(r"^Type Errors\s+[1-9][0-9]* (?:failed|errors?)\b")),
+    // Failed file or suite totals are ordinary unless the table's whole-run
+    // comparisons establish a failure outside the test counts.
+    (JAVASCRIPT, Failure, Line(r"^(?:Test Suites:|Test Files)\s+.*\b[1-9][0-9]* failed\b")),
+    (JAVASCRIPT, Failure, Line(r"^FAIL ")),
+    // Vitest 3.2.4 reporters/base.ts and @vitest/runner runSuite: failed
+    // files above failed tests prove that a file failed outside its tests.
+    (&[Vitest], Abnormal, Run(vitest_files_outside_tests)),
+    // Jest 29.7.0 jest-test-result/src/helpers.ts addResult increments failed
+    // suites for either failed tests or testExecError; getSummary.ts prints
+    // these suite and test totals. Excess failed suites imply execution errors.
+    (&[Jest], Abnormal, Run(jest_suites_outside_tests)),
+    // Vitest 3.2.4 reporters/base.ts reportTestSummary derives Type Errors
+    // by filtering the tests already counted by Tests. Excess is inconsistent.
+    (&[Vitest], Inconsistent, Run(vitest_types_outside_tests)),
 ];
 
 fn diagnostic(runner: Runner, line: &str) -> Option<Diagnostic> {
     static COMPILED: LazyLock<Vec<(&[Runner], Diagnostic, Regex)>> = LazyLock::new(|| {
         RULES
             .iter()
-            .map(|&(runners, kind, pattern)| (runners, kind, Regex::new(pattern).unwrap()))
+            .filter_map(|&(runners, kind, pattern)| match pattern {
+                Line(pattern) => Some((runners, kind, Regex::new(pattern).unwrap())),
+                Run(_) => None,
+            })
             .collect()
     });
     let line = line.trim();
-    if JAVASCRIPT.contains(&runner) && line.starts_with("Test Files") {
-        // The table's file-failure rule requires a valid category total.
-        vitest_file_line(line)?;
+    // A suite, file or type summary line that does not parse is runner evidence that cannot be read,
+    // for either JavaScript runner, not ordinary output to skip: the statement is not checkable.
+    if JAVASCRIPT.contains(&runner) {
+        let malformed = (line.starts_with("Test Files") && vitest_file_line(line).is_none())
+            || (line.starts_with("Test Suites:") && jest_suite_line(line).is_none())
+            || (line.starts_with("Type Errors") && vitest_type_summary(line).is_none());
+        if malformed {
+            return Some(Inconsistent);
+        }
     }
     COMPILED
         .iter()
@@ -636,6 +673,65 @@ fn vitest_file_line(line: &str) -> Option<Counts> {
     totaled_items(&c[1], c[2].parse().ok()?, " | ")
 }
 
+fn jest_suite_summary(body: &str) -> Option<Option<Counts>> {
+    let lines: Vec<_> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("Test Suites:"))
+        .collect();
+    match lines.as_slice() {
+        [] => Some(None),
+        [line] => jest_suite_line(line).map(Some),
+        _ => None,
+    }
+}
+
+fn jest_suite_line(line: &str) -> Option<Counts> {
+    let (items, total) = line
+        .strip_prefix("Test Suites:")?
+        .trim()
+        .rsplit_once(", ")?;
+    totaled_items(items, total.strip_suffix(" total")?.parse().ok()?, ", ")
+}
+
+fn jest_suites_outside_tests(body: &str) -> bool {
+    let (Some(tests), Some(Some(suites))) = (javascript_summary(body), jest_suite_summary(body))
+    else {
+        return false;
+    };
+    suites.failed > tests.failed
+}
+
+fn vitest_type_summary(body: &str) -> Option<Option<u64>> {
+    static TYPES: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^Type Errors\s+([0-9]+) (failed|errors?)$").unwrap());
+    let lines: Vec<_> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("Type Errors"))
+        .collect();
+    match lines.as_slice() {
+        [] => Some(None),
+        [line] if line.strip_prefix("Type Errors")?.trim() == "no errors" => Some(Some(0)),
+        [line] => {
+            let counts = TYPES.captures(line)?;
+            let total = counts[1].parse().ok()?;
+            // Only the reporter's "failed" form supplies a type-test count.
+            // Legacy "error" diagnostics retain ordinary-failure semantics.
+            Some((counts[2] == *"failed").then_some(total))
+        }
+        _ => None,
+    }
+}
+
+fn vitest_types_outside_tests(body: &str) -> bool {
+    let (Some(tests), Some(Some(types))) = (javascript_summary(body), vitest_type_summary(body))
+    else {
+        return false;
+    };
+    types > tests.failed
+}
+
 #[cfg(test)]
 mod diagnostic_tests {
     use super::*;
@@ -673,10 +769,14 @@ mod diagnostic_tests {
             ("Type Errors  1 failed", JAVASCRIPT, Some(Failure)),
             ("Type Errors 1 error", JAVASCRIPT, Some(Failure)),
             ("Type Errors  no errors", NONE, None),
+            // Malformed summary lines are unreadable runner evidence for both JavaScript runners.
+            ("Type Errors 2 failed extra", JAVASCRIPT, Some(Inconsistent)),
+            ("Type Errors 18446744073709551616 failed", JAVASCRIPT, Some(Inconsistent)),
             (" Test Files  2 failed (2)", JAVASCRIPT, Some(Failure)),
-            ("Test Files 2 failed (1)", NONE, None),
-            ("Test Files 1 failed | 1 skipped (1)", NONE, None),
-            ("Test Files 2 failed (", NONE, None),
+            ("Test Files 2 failed (1)", JAVASCRIPT, Some(Inconsistent)),
+            ("Test Files 1 failed | 1 skipped (1)", JAVASCRIPT, Some(Inconsistent)),
+            ("Test Files 2 failed (", JAVASCRIPT, Some(Inconsistent)),
+            ("Test Suites: garbage", JAVASCRIPT, Some(Inconsistent)),
             ("Test Suites: 1 failed, 1 total", JAVASCRIPT, Some(Failure)),
             (" FAIL  math.test.ts > adds", JAVASCRIPT, Some(Failure)),
             ("      Tests  1 failed (1)", NONE, None),
@@ -693,6 +793,42 @@ mod diagnostic_tests {
                     None
                 };
                 assert_eq!(diagnostic(runner, line), want, "{runner:?} {line:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn whole_run_diagnostics_are_scoped_and_require_complete_counts() {
+        for (body, owner, expected) in [
+            (
+                "Test Suites: 2 failed, 2 total\nTests: 1 failed, 1 total\n",
+                Jest,
+                Some(Abnormal),
+            ),
+            (
+                "Test Suites: 1 failed, 1 total\nTests: 1 failed, 1 total\n",
+                Jest,
+                None,
+            ),
+            (
+                "Test Suites: 2 failed, 1 total\nTests: 1 failed, 1 total\n",
+                Jest,
+                None,
+            ),
+            (
+                "Type Errors 2 failed\nTests 1 failed (1)\n",
+                Vitest,
+                Some(Inconsistent),
+            ),
+            ("Type Errors 1 failed\nTests 1 failed (1)\n", Vitest, None),
+            ("Type Errors 2 failed\nTests 1 failed (\n", Vitest, None),
+        ] {
+            for runner in [Cargo, Pytest, Vitest, Jest] {
+                assert_eq!(
+                    runner.unaccounted_failures(body),
+                    if runner == owner { expected } else { None },
+                    "{runner:?}: {body:?}"
+                );
             }
         }
     }
