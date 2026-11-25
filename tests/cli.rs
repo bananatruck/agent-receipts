@@ -2189,3 +2189,128 @@ fn scope_checks_skip_rename_detection() {
         "--no-renames\n--no-renames\n--find-renames=50%\n-l0\n--no-renames\n--no-renames\n"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn clean_status_cannot_execute_filters_added_after_preflight() {
+    use std::os::unix::fs::PermissionsExt;
+    let repository = Repository::new();
+    repository.write(".gitattributes", "tracked.txt filter=probe\n");
+    repository.write("tracked.txt", "before\n");
+    repository.commit();
+    repository.write("tracked.txt", "after!\n");
+    let helpers = tempfile::tempdir().unwrap();
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|path| path.join("git"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let wrapper = helpers.path().join("git");
+    let marker = helpers.path().join("filter-executed");
+    let reached = helpers.path().join("status-reached");
+    fs::write(&wrapper, "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = status ]; then\n    \"$REAL_GIT\" -C \"$FIXTURE_REPO\" config \"filter.probe.$FILTER_KIND\" 'printf executed > \"$FILTER_MARKER\"; cat' || exit\n    printf reached > \"$STATUS_MARKER\" || exit\n  fi\ndone\nexec \"$REAL_GIT\" \"$@\"\n").unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        helpers.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let config = repository.path().join(".git/config");
+    let original_config = fs::read(&config).unwrap();
+    for kind in ["clean", "process"] {
+        fs::write(&config, &original_config).unwrap();
+        let output = repository.check_with(
+            "Tree is clean\n",
+            &[],
+            &[
+                ("PATH", &path),
+                ("REAL_GIT", real_git.to_str().unwrap()),
+                ("FIXTURE_REPO", repository.path().to_str().unwrap()),
+                ("FILTER_KIND", kind),
+                ("FILTER_MARKER", marker.to_str().unwrap()),
+                ("STATUS_MARKER", reached.to_str().unwrap()),
+            ],
+        );
+        assert_eq!(fs::read_to_string(&reached).unwrap(), "reached");
+        assert!(!marker.exists(), "{kind} executed: {output:?}");
+        assert_ne!(output.status.code(), Some(0), "{kind}: {output:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_status_rejects_index_flags_set_and_cleared_during_status() {
+    use std::os::unix::fs::PermissionsExt;
+    let repository = Repository::new();
+    repository.write("tracked.txt", "before\n");
+    repository.commit();
+    repository.write("tracked.txt", "after!\n");
+    let helpers = tempfile::tempdir().unwrap();
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|path| path.join("git"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let wrapper = helpers.path().join("git");
+    let marker = helpers.path().join("status-reached");
+    fs::write(&wrapper, "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = status ]; then\n    \"$REAL_GIT\" -C \"$FIXTURE_REPO\" update-index \"$INDEX_FLAG\" tracked.txt || exit\n    \"$REAL_GIT\" \"$@\"\n    result=$?\n    \"$REAL_GIT\" -C \"$FIXTURE_REPO\" update-index --no-assume-unchanged tracked.txt || exit\n    \"$REAL_GIT\" -C \"$FIXTURE_REPO\" update-index --no-skip-worktree tracked.txt || exit\n    printf '%s\\n' \"$INDEX_FLAG\" >> \"$STATUS_MARKER\" || exit\n    exit \"$result\"\n  fi\ndone\nexec \"$REAL_GIT\" \"$@\"\n").unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        helpers.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    for flag in ["--assume-unchanged", "--skip-worktree"] {
+        fs::write(&marker, "").unwrap();
+        let output = repository.check_with(
+            "Tree is clean\n",
+            &[],
+            &[
+                ("PATH", &path),
+                ("REAL_GIT", real_git.to_str().unwrap()),
+                ("FIXTURE_REPO", repository.path().to_str().unwrap()),
+                ("INDEX_FLAG", flag),
+                ("STATUS_MARKER", marker.to_str().unwrap()),
+            ],
+        );
+        assert_eq!(fs::read_to_string(&marker).unwrap(), format!("{flag}\n"));
+        assert_eq!(output.status.code(), Some(3), "{flag}: {output:?}");
+        assert_verdict(&output, 1, "working tree clean", "not checkable");
+    }
+}
+
+#[test]
+fn clean_snapshots_preserve_conversion_ignores_split_indexes_and_worktrees() {
+    let repository = Repository::new();
+    repository.git(&["config", "core.autocrlf", "true"]);
+    repository.write("tracked.txt", "line\r\n");
+    repository.commit();
+    repository.write(".git/info/exclude", "ignored.txt\n");
+    repository.write("ignored.txt", "ignored\n");
+    repository.git(&["update-index", "--split-index"]);
+    assert_eq!(repository.git(&["status", "--porcelain=v1"]), "");
+    let output = repository.check("Tree is clean\n");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    repository.write("tracked.txt", "edit\r\n");
+    let output = repository.check("Tree is clean\n");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+
+    let linked = tempfile::tempdir().unwrap();
+    repository.git(&[
+        "worktree",
+        "add",
+        "--detach",
+        linked.path().to_str().unwrap(),
+    ]);
+    let output = repository.check_with(
+        "Tree is clean\n",
+        &["--repo", linked.path().to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    fs::write(linked.path().join("tracked.txt"), "changed\n").unwrap();
+    let output = repository.check_with(
+        "Tree is clean\n",
+        &["--repo", linked.path().to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+}

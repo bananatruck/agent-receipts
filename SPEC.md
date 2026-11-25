@@ -64,7 +64,8 @@ File existence concerns HEAD, not an uncommitted working copy.
 Missing HEAD makes file, diff, and default-HEAD ancestry evidence unavailable.
 Clean-tree checks include staged, unstaged, and untracked changes, and exclude ignored files.
 Configured clean or process filters, assume-unchanged or skip-worktree index flags, and submodule worktrees make cleanliness not checkable.
-Index preflight checks inspect the whole repository even when --repo selects a subdirectory.
+Status and index visibility checks inspect a private index copy for the whole repository, even when --repo selects a subdirectory.
+Changes to the live index identity, size, or timestamps during the check make cleanliness not checkable.
 They describe the observation time rather than a past state.
 
 `--base COMMIT` resolves a local commit and compares its tree with HEAD's tree.
@@ -184,7 +185,9 @@ Git subprocesses define repository facts without adding a Git library.
 Arguments are passed without a shell, optional index locks and filesystem monitor hooks are disabled, and lazy object fetching is disabled.
 An empty Git protocol allowlist denies all transports, including direct promisor fetches.
 Replacement objects, global and system configuration, and inherited configuration overrides are disabled.
-Status is refused before execution when clean or process filters are configured or submodules are present.
+Status uses a private Git directory with resolved content and path comparison settings, copied index and metadata, and no filter definitions or configuration includes.
+Configured clean or process filters and submodules make cleanliness not checkable.
+Later live configuration changes cannot introduce filters into the status subprocess.
 Repository-location environment variables are removed so `--repo` chooses the checked repository.
 External diff drivers and text conversion are disabled for diff checks.
 The command-line parser, fixed grammar, and JSON serializer use established libraries listed in Cargo.toml.

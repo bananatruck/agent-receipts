@@ -194,8 +194,8 @@ The program uses fixed grammar rather than arbitrary natural-language interpreta
 It cannot prove code quality, intent, authorship, report completeness, evidence authenticity, or when tests ran.
 An endpoint diff cannot reveal every path edited during a session.
 A clean-tree check excludes ignored files and describes only its observation time.
-Index visibility is checked before and after status.
-This catches flags left set during status but cannot detect every transient concurrent change.
+Status and index visibility checks use a private copy of the index.
+Changes to the live index identity, size, or timestamps during the check make cleanliness not checkable.
 Configured clean or process filters, hidden index entries marked assume-unchanged or skip-worktree, and submodule worktrees make cleanliness not checkable.
 File actions on submodule entries are also not checkable.
 File checks inspect stored HEAD entries without following intermediate symlinks.
@@ -207,7 +207,9 @@ The program trusts the installed Git executable, its configuration parser, and t
 It reads repository configuration but disables replacement objects, filesystem monitor hooks, external diff drivers, text conversion, and lazy fetching.
 An empty Git protocol allowlist also blocks direct promisor fetches.
 Global and system Git configuration and inherited configuration overrides are excluded.
-It checks filter configuration before status and refuses filtered repositories or submodule worktrees instead of running their configured programs.
+Status uses a private Git directory with resolved comparison settings and no filter definitions or configuration includes.
+Filters configured before the snapshot and submodule worktrees make cleanliness not checkable.
+Later changes to the live configuration cannot add executable filters to the status subprocess.
 These precautions do not make Git a sandbox for corrupted repositories or prove that local objects and refs are authentic.
 Some truncation between completed test suites is indistinguishable from a shorter complete log.
 Repository evidence is not atomic if another process changes it during verification.

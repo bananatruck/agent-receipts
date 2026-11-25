@@ -1,3 +1,5 @@
+use std::fs;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -31,11 +33,15 @@ struct Change {
 
 pub struct Repository {
     path: PathBuf,
+    git_dir: Option<PathBuf>,
 }
 
 impl Repository {
     pub fn open(path: PathBuf) -> Result<Self, String> {
-        let mut repository = Self { path };
+        let mut repository = Self {
+            path,
+            git_dir: None,
+        };
         let output = repository.git(&["rev-parse", "--is-inside-work-tree"])?;
         if !output.status.success() || output.stdout != b"true\n" {
             return Err(format!(
@@ -50,7 +56,15 @@ impl Repository {
     }
 
     fn git(&self, args: &[&str]) -> Result<Output, String> {
-        Command::new("git")
+        let mut command = Command::new("git");
+        if let Some(directory) = &self.git_dir {
+            command
+                .arg("--git-dir")
+                .arg(directory)
+                .arg("--work-tree")
+                .arg(&self.path);
+        }
+        command
             .args([
                 "--no-optional-locks",
                 "--no-replace-objects",
@@ -367,37 +381,33 @@ impl Repository {
     }
 
     fn clean_tree(&self) -> Result<Finding, String> {
-        let filters = self.git(&[
-            "config",
-            "--name-only",
-            "--get-regexp",
-            r"^filter\..*\.(clean|process)$",
-        ])?;
-        match filters.status.code() {
-            Some(1) => {}
-            Some(0) => {
-                return Err(
-                    "configured clean or process filters prevent a safe working-tree check".into(),
-                );
-            }
-            _ => return Err("cannot inspect repository filter configuration".into()),
-        }
-        self.check_index_visibility()?;
+        let index = self.git_path("index")?;
+        let before = index_stamp(&index)?;
+        let directory =
+            tempfile::tempdir().map_err(|e| format!("cannot snapshot Git evidence: {e}"))?;
+        let snapshot = Self {
+            path: self.path.clone(),
+            git_dir: Some(directory.path().to_owned()),
+        };
+        self.prepare_status_snapshot(&snapshot)?;
+        snapshot.check_index_visibility()?;
 
-        let output = self.git(&[
+        let output = snapshot.git(&[
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
             "--ignore-submodules=none",
         ])?;
         let status = successful_text(output)?;
-        // Status can ignore entries whose flags changed after preflight.
-        // Recheck before trusting it; repository reads are not atomic.
-        self.check_index_visibility()?;
+        // Status and visibility checks consume one private index. Also refuse
+        // live-index transitions, including flags set and cleared during status.
+        if before != index_stamp(&index)? {
+            return Err("repository index changed during the working-tree check".into());
+        }
         Ok(if status.is_empty() {
             Finding {
                 verdict: Verdict::Confirmed,
-                evidence: "git status --porcelain=v1 --untracked-files=all --ignore-submodules=none returned no changes; ignored files excluded".into(),
+                evidence: "git status --porcelain=v1 --untracked-files=all --ignore-submodules=none returned no changes using a private index and sanitized configuration; ignored files excluded".into(),
             }
         } else {
             Finding {
@@ -405,6 +415,101 @@ impl Repository {
                 evidence: format!("git status reports changes: {}", status.trim_end()),
             }
         })
+    }
+
+    fn git_path(&self, name: &str) -> Result<PathBuf, String> {
+        let path = successful_text(self.git(&[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            name,
+        ])?)?;
+        Ok(PathBuf::from(
+            path.strip_suffix('\n').ok_or("missing Git path")?,
+        ))
+    }
+
+    fn prepare_status_snapshot(&self, snapshot: &Self) -> Result<(), String> {
+        let directory = snapshot
+            .git_dir
+            .as_ref()
+            .ok_or("missing snapshot directory")?;
+        fs::create_dir_all(directory.join("objects/info")).map_err(snapshot_error)?;
+        fs::create_dir_all(directory.join("refs")).map_err(snapshot_error)?;
+        fs::create_dir_all(directory.join("info")).map_err(snapshot_error)?;
+        let objects = self.git_path("objects")?;
+        let objects = objects.to_str().ok_or("non-UTF-8 object directory")?;
+        if objects.contains(['\n', '\r']) {
+            return Err("object directory cannot be represented in an alternates file".into());
+        }
+        fs::write(
+            directory.join("objects/info/alternates"),
+            format!("{objects}\n"),
+        )
+        .map_err(snapshot_error)?;
+        let head = self.git(&["rev-parse", "--verify", "HEAD"])?;
+        let head = if head.status.success() {
+            successful_text(head)?
+        } else {
+            // An unborn branch has no committed tree, but its files can still
+            // be inspected. Other HEAD errors remain unavailable evidence.
+            successful_text(self.git(&["symbolic-ref", "HEAD"])?)?;
+            "ref: refs/heads/unborn\n".to_owned()
+        };
+        fs::write(directory.join("HEAD"), head).map_err(snapshot_error)?;
+        for name in ["index", "info/exclude", "info/attributes"] {
+            copy_optional(self.git_path(name)?, directory.join(name))?;
+        }
+        let shared = successful_text(self.git(&["rev-parse", "--shared-index-path"])?)?;
+        if let Some(path) = shared.strip_suffix('\n').filter(|s| !s.is_empty()) {
+            let source = self.path.join(path);
+            let name = source.file_name().ok_or("invalid shared index path")?;
+            fs::copy(&source, directory.join(name)).map_err(snapshot_error)?;
+        }
+
+        // git-config(1) --null --list resolves includes in the original repo.
+        // Copy only data settings used for content and path comparisons. Never
+        // copy includes, filters, hooks, monitors or repository-location keys.
+        // convert.c read_convert_config reads filters from the status process's
+        // config, so a preflight on the live config alone cannot prevent races.
+        let config = successful_text(self.git(&["config", "--null", "--list", "--includes"])?)?;
+        let target = directory.join("config");
+        let target = target.to_str().ok_or("non-UTF-8 snapshot directory")?;
+        for entry in config.split_terminator('\0') {
+            let (key, value) = entry.split_once('\n').unwrap_or((entry, "true"));
+            if key.starts_with("filter.") && (key.ends_with(".clean") || key.ends_with(".process"))
+            {
+                return Err(
+                    "configured clean or process filters prevent a safe working-tree check".into(),
+                );
+            }
+            if key.starts_with("extensions.")
+                && key != "extensions.objectformat"
+                && key != "extensions.worktreeconfig"
+            {
+                return Err(format!(
+                    "repository extension {key} is not supported by cleanliness snapshots"
+                ));
+            }
+            if matches!(
+                key,
+                "core.repositoryformatversion"
+                    | "extensions.objectformat"
+                    | "core.filemode"
+                    | "core.symlinks"
+                    | "core.ignorecase"
+                    | "core.precomposeunicode"
+                    | "core.autocrlf"
+                    | "core.eol"
+                    | "core.safecrlf"
+                    | "core.checkroundtripencoding"
+                    | "core.attributesfile"
+                    | "core.excludesfile"
+            ) {
+                successful_text(self.git(&["config", "--file", target, "--add", key, value])?)?;
+            }
+        }
+        Ok(())
     }
 
     fn check_index_visibility(&self) -> Result<(), String> {
@@ -438,4 +543,45 @@ fn successful_text(output: Output) -> Result<String, String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ))
     }
+}
+
+fn snapshot_error(error: std::io::Error) -> String {
+    format!("cannot snapshot Git evidence: {error}")
+}
+
+fn copy_optional(source: PathBuf, destination: PathBuf) -> Result<(), String> {
+    match fs::copy(source, destination) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(snapshot_error(error)),
+    }
+}
+
+#[derive(PartialEq)]
+struct IndexStamp {
+    length: u64,
+    modified: std::time::SystemTime,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+}
+
+fn index_stamp(path: &std::path::Path) -> Result<Option<IndexStamp>, String> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot inspect repository index: {error}")),
+    };
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    Ok(Some(IndexStamp {
+        length: metadata.len(),
+        modified: metadata.modified().map_err(snapshot_error)?,
+        #[cfg(unix)]
+        identity: (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        ),
+    }))
 }
