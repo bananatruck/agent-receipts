@@ -1604,7 +1604,10 @@ fn list_padding_tabs_include_the_original_marker_column() {
 #[cfg(unix)]
 #[test]
 fn pushed_hashes_reject_prefix_collisions_across_object_types() {
-    let repository = Repository::new();
+    let repository = Repository {
+        directory: tempfile::tempdir().unwrap(),
+    };
+    repository.git(&["init", "--initial-branch=main", "--object-format=sha1"]);
     repository.git(&["hash-object", "-w", "-t", "tree", "/dev/null"]);
     repository.write("commit-input", "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nPrefix fixture 10484\n");
     let commit = repository.git(&["hash-object", "-w", "-t", "commit", "commit-input"]);
