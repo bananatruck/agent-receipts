@@ -41,6 +41,7 @@ impl Repository {
             .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
             .env_remove("GIT_NAMESPACE")
             .env_remove("GIT_CONFIG_PARAMETERS")
+            .env_remove("GIT_CONFIG")
             .env("GIT_CONFIG_COUNT", "0")
             .output()
             .unwrap();
@@ -2532,4 +2533,33 @@ fn fences_follow_list_containers_and_allow_repeated_tilde_info() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn fixture_git_commands_ignore_inherited_config_files() {
+    if std::env::var_os("FIXTURE_GIT_CONFIG_REPLAY").is_some() {
+        let repository = Repository::new();
+        repository.write("tracked.txt", "fixture\n");
+        repository.commit();
+        return;
+    }
+    let config = tempfile::NamedTempFile::new().unwrap();
+    let contents = "# preserve this unrelated config file\n";
+    fs::write(config.path(), contents).unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "fixture_git_commands_ignore_inherited_config_files",
+            "--nocapture",
+        ])
+        .env("GIT_CONFIG", config.path())
+        .env("FIXTURE_GIT_CONFIG_REPLAY", "1")
+        .output()
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(config.path()).unwrap(),
+        contents,
+        "fixture commands changed the inherited configuration"
+    );
+    assert!(output.status.success(), "{output:?}");
 }
