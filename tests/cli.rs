@@ -2149,3 +2149,43 @@ fn fences_distinguish_ascii_closers_and_single_tilde_info() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[cfg(unix)]
+#[test]
+fn scope_checks_skip_rename_detection() {
+    use std::os::unix::fs::PermissionsExt;
+    let repository = Repository::new();
+    repository.write("old.txt", "fixture\n");
+    let base = repository.commit();
+    repository.git(&["mv", "old.txt", "new.txt"]);
+    repository.commit();
+    let helpers = tempfile::tempdir().unwrap();
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|path| path.join("git"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let wrapper = helpers.path().join("git");
+    let marker = helpers.path().join("diff-options");
+    fs::write(&wrapper, "#!/bin/sh\nfor arg do\n  case $arg in\n    --no-renames|--find-renames=50%|-l0) printf '%s\\n' \"$arg\" >> \"$DIFF_MARKER\" ;;\n  esac\ndone\nexec \"$REAL_GIT\" \"$@\"\n").unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        helpers.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let output = repository.check_with(
+        "Only touched old.txt, new.txt\nDid not modify old.txt\nRenamed old.txt to new.txt\nAdded new.txt\nDeleted old.txt\n",
+        &["--base", &base],
+        &[("PATH", &path), ("REAL_GIT", real_git.to_str().unwrap()), ("DIFF_MARKER", marker.to_str().unwrap())],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_verdict(&output, 1, "committed diff scope", "confirmed");
+    assert_verdict(&output, 2, "committed diff scope", "contradicted");
+    for line in 3..=5 {
+        assert_verdict(&output, line, "committed path action", "confirmed");
+    }
+    assert_eq!(
+        fs::read_to_string(marker).unwrap(),
+        "--no-renames\n--no-renames\n--find-renames=50%\n-l0\n--no-renames\n--no-renames\n"
+    );
+}

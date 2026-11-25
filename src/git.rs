@@ -103,7 +103,11 @@ impl Repository {
         })
     }
 
-    fn changes(&self, base: Option<&str>) -> Result<(String, String, Vec<Change>), String> {
+    fn changes(
+        &self,
+        base: Option<&str>,
+        renames: bool,
+    ) -> Result<(String, String, Vec<Change>), String> {
         let base = base.ok_or("supply --base COMMIT to inspect the committed diff through HEAD")?;
         let base = successful_text(self.git(&[
             "rev-parse",
@@ -116,7 +120,7 @@ impl Repository {
         let head = successful_text(self.git(&["rev-parse", "--verify", "HEAD^{commit}"])?)?
             .trim()
             .to_owned();
-        let text = successful_text(self.git(&[
+        let mut args = vec![
             "diff",
             "--no-ext-diff",
             "--no-textconv",
@@ -124,13 +128,16 @@ impl Repository {
             "--ignore-submodules=none",
             "--name-status",
             "-z",
-            "--find-renames=50%",
-            // git-diff(1): zero disables the exhaustive rename limit.
-            "-l0",
-            &base,
-            &head,
-            "--",
-        ])?)?;
+        ];
+        // git-diff(1): scope and addition/deletion claims need only endpoints.
+        // Exhaustive similarity matching is necessary only for rename claims.
+        if renames {
+            args.extend(["--find-renames=50%", "-l0"]);
+        } else {
+            args.push("--no-renames");
+        }
+        args.extend([&base, &head, "--"]);
+        let text = successful_text(self.git(&args)?)?;
         let mut fields = text.split_terminator('\0');
         let mut changes = Vec::new();
         while let Some(status) = fields.next() {
@@ -172,7 +179,7 @@ impl Repository {
     }
 
     pub fn verify_diff(&self, claim: &DiffClaim, base: Option<&str>) -> Finding {
-        let result = self.changes(base).and_then(|(base, head, changes)| {
+        let result = self.changes(base, matches!(claim, DiffClaim::Action(PathAction::Renamed { .. }))).and_then(|(base, head, changes)| {
             match claim {
                 DiffClaim::DidNotModify(path) => {
                     if !self.blob_entry(&base, path)? && !self.blob_entry(&head, path)? {
