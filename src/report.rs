@@ -80,29 +80,52 @@ pub fn parse(text: &str) -> Vec<Statement> {
         .enumerate()
         .filter_map(|(index, raw)| {
             let source = raw.trim();
-            if let Some((marker, length)) = fence_marker(source) {
-                match fence {
-                    None => {
-                        fence = Some((marker, length));
-                        return None;
+            let indented = indentation(raw) >= 4;
+            let content = PREFIX.replace(source, "");
+            let prefix = &source[..source.len() - content.len()];
+            let marker_width = prefix.trim_end().len();
+            let marker_end = indentation(raw) + marker_width;
+            let padding = prefix[marker_width..]
+                .chars()
+                .fold(marker_end, |column, c| {
+                    if c == '\t' {
+                        column + 4 - column % 4
+                    } else {
+                        column + 1
                     }
-                    Some((opening, minimum))
-                        if marker == opening
-                            && length >= minimum
-                            && source[length..].trim().is_empty() =>
-                    {
-                        fence = None;
-                        return None;
+                })
+                - marker_end;
+            let list_code = padding >= 5;
+            let delimiter = if fence.is_none() {
+                content.as_ref()
+            } else {
+                source
+            };
+            if !indented && !list_code {
+                if let Some((marker, length)) = fence_marker(delimiter) {
+                    match fence {
+                        None => {
+                            fence = Some((marker, length));
+                            return None;
+                        }
+                        Some((opening, minimum))
+                            if marker == opening
+                                && length >= minimum
+                                && delimiter[length..].trim().is_empty() =>
+                        {
+                            fence = None;
+                            return None;
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
-            if source.is_empty() || (fence.is_none() && is_heading(source)) {
+            if source.is_empty() {
                 return None;
             }
             let content = PREFIX.replace(source, "");
             let content = content.strip_suffix('.').unwrap_or(&content);
-            let claim = if fence.is_some() || raw.starts_with("    ") || raw.starts_with('\t') {
+            let claim = if fence.is_some() || indented || list_code {
                 Claim::Unsupported(
                     "quoted code is not an assertion; no evidence check performed".into(),
                 )
@@ -118,22 +141,25 @@ pub fn parse(text: &str) -> Vec<Statement> {
         .collect()
 }
 
+fn indentation(line: &str) -> usize {
+    line.chars()
+        .take_while(|c| matches!(c, ' ' | '\t'))
+        .fold(0, |column, c| {
+            if c == '\t' {
+                column + 4 - column % 4
+            } else {
+                column + 1
+            }
+        })
+}
+
 fn fence_marker(line: &str) -> Option<(char, usize)> {
     let marker = line.chars().next()?;
     if !matches!(marker, '`' | '~') {
         return None;
     }
     let length = line.chars().take_while(|&value| value == marker).count();
-    (length >= 3).then_some((marker, length))
-}
-
-fn is_heading(line: &str) -> bool {
-    let hashes = line
-        .chars()
-        .take_while(|&character| character == '#')
-        .count();
-    (1..=6).contains(&hashes)
-        && (line.len() == hashes || line[hashes..].starts_with(char::is_whitespace))
+    (length >= 3 && !line[length..].contains(marker)).then_some((marker, length))
 }
 
 fn argument(value: &str) -> Option<&str> {
@@ -145,6 +171,23 @@ fn argument(value: &str) -> Option<&str> {
     }
 }
 
+fn rename_arguments(value: &str) -> Option<(&str, &str)> {
+    let mut quoted = false;
+    for (index, c) in value.char_indices() {
+        if c == '`' {
+            quoted = !quoted;
+        }
+        if !quoted
+            && value
+                .get(index..index + 4)
+                .is_some_and(|s| s.eq_ignore_ascii_case(" to "))
+        {
+            return Some((&value[..index], &value[index + 4..]));
+        }
+    }
+    None
+}
+
 fn parse_claim(content: &str) -> Claim {
     if let Some(c) = ACTION.captures(content) {
         let action = match c[1].to_ascii_lowercase().as_str() {
@@ -153,7 +196,7 @@ fn parse_claim(content: &str) -> Claim {
             "renamed" => {
                 if let Some(to) = path_argument(&c[2]) {
                     Some(PathAction::Renamed { from: None, to })
-                } else if let Some((from, to)) = c[2].split_once(" to ") {
+                } else if let Some((from, to)) = rename_arguments(&c[2]) {
                     path_argument(from)
                         .zip(path_argument(to))
                         .map(|(from, to)| PathAction::Renamed {

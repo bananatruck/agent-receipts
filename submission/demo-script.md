@@ -3,6 +3,7 @@
 Target length is 2 minutes 40 seconds, below the three-minute limit.
 All reports shown are synthetic and labelled as such.
 Use the real output on screen and keep the source report visible beside it.
+The report heading stays visible as not checkable; only blank lines and recognized fence delimiters are omitted.
 
 | Time | Screen and narration |
 | --- | --- |
@@ -12,7 +13,7 @@ Use the real output on screen and keep the source report visible beside it.
 | 1:10 to 1:35 | Show the addition and exclusion checks beside the base-to-HEAD diff. Explain that the scope is committed changes and that rename checks inspect both endpoints. |
 | 1:35 to 1:55 | Run the same report with `--json`. Show `schema_version`, one statement's evidence, the summary, and the exit code. |
 | 1:55 to 2:15 | Run `sh examples/demo.sh`. Show the clean-tree check changing after an untracked file appears. |
-| 2:15 to 2:35 | Show `Not pushed` staying not checkable without a named local tracking ref. Explain that a supplied ref checks local reachability and may be stale. |
+| 2:15 to 2:35 | Show `Not pushed` staying not checkable without a named local tracking ref. Explain that a bare claim checks HEAD against the supplied local ref and that this ref may be stale. |
 | 2:35 to 2:40 | End on the source and documented limits. State that missing evidence stays not checkable. |
 
 Prepare the release binary and capture the test log before recording so compilation time is outside the video.

@@ -65,7 +65,7 @@ fn main() -> ExitCode {
     match run(Args::parse()) {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
-            eprintln!("error: {error}");
+            eprintln!("error: {}", cell(&error));
             ExitCode::from(2)
         }
     }
@@ -95,13 +95,6 @@ fn run(args: Args) -> Result<u8, String> {
     let mut contradicted = 0;
     let mut unknown = 0;
     let statements = report::parse(&report);
-    let named_commits: Vec<_> = statements
-        .iter()
-        .filter_map(|s| match &s.claim {
-            report::Claim::Commit(hash) => Some(hash.as_str()),
-            _ => None,
-        })
-        .collect();
     for statement in &statements {
         let finding = match &statement.claim {
             report::Claim::Tests {
@@ -109,12 +102,9 @@ fn run(args: Args) -> Result<u8, String> {
                 passed,
                 failed,
             } => logs.verify(command, *passed, *failed),
-            report::Claim::Pushed { pushed, commit } => repository.pushed(
-                *pushed,
-                commit.as_deref(),
-                &named_commits,
-                args.remote_ref.as_deref(),
-            ),
+            report::Claim::Pushed { pushed, commit } => {
+                repository.pushed(*pushed, commit.as_deref(), args.remote_ref.as_deref())
+            }
             report::Claim::Diff(claim) => repository.verify_diff(claim, args.base.as_deref()),
             _ => repository.verify(&statement.claim),
         };
@@ -179,11 +169,20 @@ fn run(args: Args) -> Result<u8, String> {
 fn cell(text: &str) -> String {
     text.chars()
         .flat_map(|character| {
-            if character == '\\' || character.is_control() {
+            if character == '\\' || character.is_control() || is_format_control(character) {
                 character.escape_default().collect::<Vec<_>>()
             } else {
                 vec![character]
             }
         })
         .collect()
+}
+
+fn is_format_control(c: char) -> bool {
+    matches!(c, '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}' |
+        '\u{890}'..='\u{891}' | '\u{8e2}' | '\u{180e}' | '\u{200b}'..='\u{200f}' |
+        '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' |
+        '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{110bd}' | '\u{110cd}' |
+        '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}' |
+        '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
 }

@@ -35,7 +35,7 @@ pub struct Repository {
 
 impl Repository {
     pub fn open(path: PathBuf) -> Result<Self, String> {
-        let repository = Self { path };
+        let mut repository = Self { path };
         let output = repository.git(&["rev-parse", "--is-inside-work-tree"])?;
         if !output.status.success() || output.stdout != b"true\n" {
             return Err(format!(
@@ -44,15 +44,32 @@ impl Repository {
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
+        let root = successful_text(repository.git(&["rev-parse", "--show-toplevel"])?)?;
+        repository.path = PathBuf::from(root.strip_suffix('\n').ok_or("missing repository root")?);
         Ok(repository)
     }
 
     fn git(&self, args: &[&str]) -> Result<Output, String> {
         Command::new("git")
-            .args(["--no-optional-locks", "-c", "core.fsmonitor=false", "-C"])
+            .args([
+                "--no-optional-locks",
+                "--no-replace-objects",
+                "--literal-pathspecs",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-C",
+            ])
             .arg(&self.path)
             .args(args)
             .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_COUNT", "0")
+            .env_remove("GIT_CONFIG_PARAMETERS")
+            .env_remove("GIT_CONFIG")
+            .env_remove("GIT_REPLACE_REF_BASE")
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
@@ -129,22 +146,62 @@ impl Repository {
         Ok((base, head, changes))
     }
 
+    fn entry_mode(&self, revision: &str, path: &str) -> Result<Option<String>, String> {
+        let text = successful_text(self.git(&[
+            "--literal-pathspecs",
+            "ls-tree",
+            "-z",
+            "--full-tree",
+            revision,
+            "--",
+            path,
+        ])?)?;
+        Ok(text.split_once(' ').map(|(mode, _)| mode.to_owned()))
+    }
+
+    fn blob_entry(&self, revision: &str, path: &str) -> Result<bool, String> {
+        Ok(matches!(
+            self.entry_mode(revision, path)?.as_deref(),
+            Some("100644" | "100755" | "120000")
+        ))
+    }
+
     pub fn verify_diff(&self, claim: &DiffClaim, base: Option<&str>) -> Finding {
-        let result = self.changes(base).map(|(base, head, changes)| {
+        let result = self.changes(base).and_then(|(base, head, changes)| {
+            match claim {
+                DiffClaim::DidNotModify(path) => {
+                    if !self.blob_entry(&base, path)? && !self.blob_entry(&head, path)? {
+                        return Err("exclusion requires a literal file present at a diff endpoint; directories, missing paths and submodule contents are not checkable".into());
+                    }
+                }
+                DiffClaim::Action(action) => {
+                    let paths = match action {
+                        PathAction::Added(path) | PathAction::Deleted(path) => vec![path],
+                        PathAction::Renamed { from, to } => from.iter().chain(std::iter::once(to)).collect(),
+                    };
+                    for path in paths {
+                        if self.entry_mode(&base, path)?.as_deref() == Some("160000")
+                            || self.entry_mode(&head, path)?.as_deref() == Some("160000") {
+                            return Err("file actions do not check submodule entries".into());
+                        }
+                    }
+                }
+                _ => {}
+            }
             let paths: Vec<_> = changes.iter().flat_map(|change| change.paths.iter()).collect();
             let matches = match claim {
                 DiffClaim::OnlyTouched(allowed) => paths.iter().all(|p| allowed.contains(p)),
                 DiffClaim::DidNotModify(path) => !paths.contains(&path),
                 DiffClaim::Action(action) => changes.iter().any(|change| match action {
-                    PathAction::Added(path) => change.status == "A" && change.paths.first() == Some(path),
-                    PathAction::Deleted(path) => change.status == "D" && change.paths.first() == Some(path),
+                    PathAction::Added(path) => (change.status == "A" || change.status.starts_with('R')) && change.paths.last() == Some(path),
+                    PathAction::Deleted(path) => (change.status == "D" || change.status.starts_with('R')) && change.paths.first() == Some(path),
                     PathAction::Renamed { from, to } => change.status.starts_with('R') && change.paths.last() == Some(to) && from.as_ref().is_none_or(|from| change.paths.first() == Some(from)),
                 }),
             };
-            Finding {
+            Ok(Finding {
                 verdict: if matches { Verdict::Confirmed } else { Verdict::Contradicted },
                 evidence: format!("committed diff {base}..{head}: {}; excludes working-tree changes and intermediate edits", changes.iter().map(|c| format!("{} {}", c.status, c.paths.join(" -> "))).collect::<Vec<_>>().join("; ")),
-            }
+            })
         });
         result.unwrap_or_else(|evidence| Finding {
             verdict: Verdict::NotCheckable,
@@ -152,14 +209,8 @@ impl Repository {
         })
     }
 
-    pub fn pushed(
-        &self,
-        pushed: bool,
-        commit: Option<&str>,
-        named: &[&str],
-        remote: Option<&str>,
-    ) -> Finding {
-        let result = self.pushed_evidence(pushed, commit, named, remote);
+    pub fn pushed(&self, pushed: bool, commit: Option<&str>, remote: Option<&str>) -> Finding {
+        let result = self.pushed_evidence(pushed, commit, remote);
         result.unwrap_or_else(|evidence| Finding {
             verdict: Verdict::NotCheckable,
             evidence,
@@ -170,7 +221,6 @@ impl Repository {
         &self,
         pushed: bool,
         commit: Option<&str>,
-        named: &[&str],
         remote: Option<&str>,
     ) -> Result<Finding, String> {
         let remote =
@@ -183,23 +233,26 @@ impl Repository {
         let target = successful_text(self.git(&["show-ref", "--verify", "--hash", remote])?)?;
         let target = target.trim();
         successful_text(self.git(&["cat-file", "-e", &format!("{target}^{{commit}}")])?)?;
-        let commits = if let Some(commit) = commit {
-            vec![commit]
-        } else if named.is_empty() {
-            vec!["HEAD"]
+        let resolved = if let Some(hash) = commit {
+            let objects =
+                successful_text(self.git(&["rev-parse", &format!("--disambiguate={hash}")])?)?;
+            let objects: Vec<_> = objects.lines().collect();
+            let [object] = objects.as_slice() else {
+                return Err("explicit hash must identify exactly one local commit object".into());
+            };
+            if successful_text(self.git(&["cat-file", "-t", object])?)?.trim() != "commit" {
+                return Err("explicit hash does not identify a commit object".into());
+            }
+            (*object).to_owned()
         } else {
-            named.to_vec()
+            successful_text(self.git(&["rev-parse", "--verify", "HEAD^{commit}"])?)?
+                .trim()
+                .to_owned()
         };
+        let resolved = resolved.as_str();
         let mut evidence = Vec::new();
         let mut matches = true;
-        for commit in commits {
-            let resolved = successful_text(self.git(&[
-                "rev-parse",
-                "--verify",
-                "--end-of-options",
-                &format!("{commit}^{{commit}}"),
-            ])?)?;
-            let resolved = resolved.trim();
+        {
             let output = self.git(&["merge-base", "--is-ancestor", resolved, target])?;
             let present = match output.status.code() {
                 Some(0) => true,
@@ -302,6 +355,38 @@ impl Repository {
     }
 
     fn clean_tree(&self) -> Result<Finding, String> {
+        let filters = self.git(&[
+            "config",
+            "--name-only",
+            "--get-regexp",
+            r"^filter\..*\.(clean|process)$",
+        ])?;
+        match filters.status.code() {
+            Some(1) => {}
+            Some(0) => {
+                return Err(
+                    "configured clean or process filters prevent a safe working-tree check".into(),
+                );
+            }
+            _ => return Err("cannot inspect repository filter configuration".into()),
+        }
+        let stages = successful_text(self.git(&["ls-files", "--stage", "-z"])?)?;
+        if stages
+            .split_terminator('\0')
+            .any(|entry| entry.starts_with("160000 "))
+        {
+            return Err("working-tree cleanliness inside submodules is not checkable".into());
+        }
+        let entries = successful_text(self.git(&["ls-files", "-v", "-z"])?)?;
+        if entries.split_terminator('\0').any(|entry| {
+            entry
+                .as_bytes()
+                .first()
+                .is_some_and(|tag| tag.is_ascii_lowercase() || *tag == b'S')
+        }) {
+            return Err("index has assume-unchanged or skip-worktree entries; working-tree cleanliness is not checkable".into());
+        }
+
         let output = self.git(&[
             "status",
             "--porcelain=v1",

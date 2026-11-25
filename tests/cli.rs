@@ -36,6 +36,12 @@ impl Repository {
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+            .env_remove("GIT_NAMESPACE")
+            .env_remove("GIT_CONFIG_PARAMETERS")
+            .env("GIT_CONFIG_COUNT", "0")
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
@@ -60,7 +66,10 @@ impl Repository {
 
     fn check_with(&self, report: &str, args: &[&str], environment: &[(&str, &str)]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_agent-receipts"));
-        command.arg("--repo").arg(self.path()).args(args);
+        if !args.contains(&"--repo") {
+            command.arg("--repo").arg(self.path());
+        }
+        command.args(args);
         for (name, value) in environment {
             command.env(name, value);
         }
@@ -115,7 +124,7 @@ fn checks_commit_and_file_statements_against_head() {
     assert_verdict(&output, 5, "commit exists locally", "contradicted");
     assert_verdict(&output, 6, "file at HEAD", "contradicted");
     assert!(stdout(&output).contains(&hash));
-    assert!(stdout(&output).contains("2 confirmed, 2 contradicted, 0 not checkable"));
+    assert!(stdout(&output).contains("2 confirmed, 2 contradicted, 1 not checkable"));
     assert!(output.stderr.is_empty());
 }
 
@@ -159,7 +168,7 @@ fn quoted_examples_and_nonassertions_cannot_confirm_claims() {
     for line in [3, 6, 8, 9, 10, 11] {
         assert_verdict(&output, line, "unsupported", "not checkable");
     }
-    assert!(stdout(&output).contains("0 confirmed, 0 contradicted, 6 not checkable"));
+    assert!(stdout(&output).contains("0 confirmed, 0 contradicted, 7 not checkable"));
 }
 
 #[test]
@@ -222,7 +231,7 @@ fn unsupported_reports_never_succeed_without_evidence() {
     assert_verdict(&output, 2, "local tracking ref ancestry", "not checkable");
     let output = repository.check("# Synthetic report\n\n");
     assert_eq!(output.status.code(), Some(3), "{output:?}");
-    assert!(stdout(&output).contains("0 confirmed, 0 contradicted, 0 not checkable"));
+    assert!(stdout(&output).contains("0 confirmed, 0 contradicted, 1 not checkable"));
 }
 
 #[test]
@@ -239,7 +248,7 @@ fn reads_markdown_report_files_and_paths_with_spaces() {
     )
     .unwrap();
     let output = repository.check_with("", &["--report", report.path().to_str().unwrap()], &[]);
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
     assert_verdict(&output, 2, "commit exists locally", "confirmed");
     assert_verdict(&output, 3, "file at HEAD", "confirmed");
 }
@@ -427,7 +436,7 @@ fn stored_symlinks_count_as_blobs_without_reading_the_target() {
 fn test_counts_require_a_matching_command_log_and_matching_summary() {
     let repository = Repository::new();
     let log = tempfile::NamedTempFile::new().unwrap();
-    fs::write(log.path(), "$ cargo test\ntest result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n").unwrap();
+    fs::write(log.path(), "$ cargo test\nrunning 77 tests\ntest result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n").unwrap();
     let flag = format!("cargo test={}", log.path().display());
     let output = repository.check_with(
         "Ran `cargo test`, 77 passed\nRan `cargo test`, 76 passed\nRan `pytest`, 77 passed\n",
@@ -513,7 +522,7 @@ fn pushed_statements_compare_named_commits_with_a_local_tracking_ref() {
         &args,
         &[],
     );
-    assert_verdict(&output, 2, "local tracking ref ancestry", "confirmed");
+    assert_verdict(&output, 2, "local tracking ref ancestry", "contradicted");
     assert_verdict(&output, 3, "local tracking ref ancestry", "confirmed");
     assert_verdict(&output, 4, "local tracking ref ancestry", "contradicted");
     assert!(stdout(&output).contains("local snapshot"));
@@ -690,5 +699,1094 @@ fn diff_scope_is_root_relative_even_with_relative_diff_configuration() {
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     for line in [1, 2] {
         assert_verdict(&output, line, "committed diff scope", "contradicted");
+    }
+}
+
+#[test]
+fn negative_scope_requires_an_existing_literal_file() {
+    let repository = Repository::new();
+    repository.write("src/main.rs", "before\n");
+    repository.write("README.md", "kept\n");
+    let base = repository.commit();
+    repository.write("src/main.rs", "after\n");
+    repository.commit();
+    for path in [
+        "src",
+        "src/*.rs",
+        "src/main.rs..",
+        "missing.txt",
+        "readme.md",
+    ] {
+        let output =
+            repository.check_with(&format!("Did not modify {path}\n"), &["--base", &base], &[]);
+        assert_eq!(output.status.code(), Some(3), "{path}: {output:?}");
+    }
+    let output = repository.check_with(
+        "Did not modify README.md\nOnly touched missing.txt\n",
+        &["--base", "HEAD"],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+}
+
+#[test]
+fn file_actions_do_not_confirm_gitlinks_or_their_contents() {
+    let repository = Repository::new();
+    repository.write("keep.txt", "kept\n");
+    let base = repository.commit();
+    repository.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("160000,{base},sub"),
+    ]);
+    repository.git(&["commit", "-m", "Add link"]);
+    let output = repository.check_with(
+        "Added sub\nCreated sub\nDid not modify sub/file.rs\n",
+        &["--base", &base],
+        &[],
+    );
+    for line in 1..=3 {
+        assert_verdict(
+            &output,
+            line,
+            if line == 3 {
+                "committed diff scope"
+            } else {
+                "committed path action"
+            },
+            "not checkable",
+        );
+    }
+}
+
+#[test]
+fn bare_push_checks_head_and_explicit_hashes_require_commit_objects() {
+    let repository = Repository::new();
+    repository.write("a.txt", "first\n");
+    let first = repository.commit();
+    repository.git(&["update-ref", "refs/remotes/origin/main", &first]);
+    repository.git(&["tag", "-a", "v1", "-m", "Fixture tag"]);
+    let tag = repository.git(&["rev-parse", "v1"]);
+    repository.write("a.txt", "second\n");
+    repository.commit();
+    let args = ["--remote-ref", "refs/remotes/origin/main"];
+    let output = repository.check_with(&format!("Pushed {tag}\nNot pushed {tag}\n"), &args, &[]);
+    for line in 1..=2 {
+        assert_verdict(
+            &output,
+            line,
+            "local tracking ref ancestry",
+            "not checkable",
+        );
+    }
+    let output = repository.check_with(
+        &format!("Commit {first} exists\nPushed\nNot pushed\n"),
+        &args,
+        &[],
+    );
+    assert_verdict(&output, 2, "local tracking ref ancestry", "contradicted");
+    assert_verdict(&output, 3, "local tracking ref ancestry", "confirmed");
+}
+
+#[test]
+fn logs_require_anchored_records_complete_suites_and_no_runner_errors() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mut failures = Vec::new();
+    for (command, body, expected) in [
+        (
+            "pytest",
+            "note: $ pytest\n7 passed in 0.10s\n$ pytest\ncollecting ...\n",
+            "not checkable",
+        ),
+        (
+            "cargo test --no-fail-fast",
+            "$ cargo test --no-fail-fast\nRunning unittests src/lib.rs\nrunning 10 tests\nerror: process didn't exit successfully: SIGSEGV\nRunning tests/cli.rs\nrunning 7 tests\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\nerror: 1 target failed:\n",
+            "contradicted",
+        ),
+        (
+            "cargo test",
+            "$ cargo test\nrunning 10 tests\nRunning tests/cli.rs\nrunning 7 tests\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+            "not checkable",
+        ),
+        (
+            "cargo test",
+            "$ cargo test\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+            "not checkable",
+        ),
+        (
+            "cargo test",
+            "$ cargo test\nrunning 2 tests\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+            "not checkable",
+        ),
+        (
+            "cargo test",
+            "$ cargo test\nrunning 2 tests\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+            "not checkable",
+        ),
+        (
+            "vitest",
+            "$ vitest\nTests 7 passed (7)\nErrors 1 error\n",
+            "contradicted",
+        ),
+        (
+            "vitest",
+            "$ vitest\nTests 7 passed (7)\nErrors 2 errors\n",
+            "contradicted",
+        ),
+        (
+            "vitest",
+            "$ vitest\nTests 7 passed (7)\nType Errors 1 error\n",
+            "contradicted",
+        ),
+        (
+            "vitest",
+            "$ vitest\nTests 7 passed (7)\nUnhandled Errors\n",
+            "contradicted",
+        ),
+        (
+            "pytest",
+            "$ pytest\n7 passed in 0.10s\nINTERNALERROR> broken hook\n",
+            "contradicted",
+        ),
+        ("vitest", "$ vitest\nTests 7 passed (7)\n", "confirmed"),
+    ] {
+        fs::write(log.path(), body).unwrap();
+        let output = repository.check_with(
+            &format!("Ran `{command}`, 7 passed\n"),
+            &["--log", &format!("{command}={}", log.path().display())],
+            &[],
+        );
+        let expected_cell = format!("\t{expected}\t");
+        if !stdout(&output).contains(&expected_cell) {
+            failures.push(format!("{body:?}: {}", stdout(&output)));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn markdown_code_context_cannot_become_an_assertion() {
+    let repository = Repository::new();
+    repository.write("a.txt", "fixture\n");
+    repository.commit();
+    let mut failures = Vec::new();
+    for report in [
+        "```\n    ```\nTree is clean\n```\n",
+        " \tTree is clean\n",
+        "-     Tree is clean\n",
+        "- ```\n  Tree is clean\n  ```\n",
+    ] {
+        let output = repository.check(report);
+        if output.status.code() != Some(3) || stdout(&output).contains("\tconfirmed\t") {
+            failures.push(format!("{report:?}: {}", stdout(&output)));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn repository_overlays_cannot_hide_missing_evidence_or_dirty_files() {
+    let mut failures = Vec::new();
+    for flag in ["--assume-unchanged", "--skip-worktree"] {
+        let repository = Repository::new();
+        repository.write("a.txt", "before\n");
+        repository.commit();
+        repository.git(&["update-index", flag, "a.txt"]);
+        repository.write("a.txt", "after\n");
+        let output = repository.check("Tree is clean\n");
+        if stdout(&output).contains("\tconfirmed\t") {
+            failures.push(format!("{flag}: {}", stdout(&output)));
+        }
+    }
+    let repository = Repository::new();
+    repository.write("a.txt", "before\n");
+    let first = repository.commit();
+    repository.write("new.txt", "new\n");
+    let second = repository.commit();
+    repository.git(&["checkout", "--detach", &first]);
+    repository.git(&["replace", &first, &second]);
+    let output = repository.check("File new.txt exists\n");
+    if !stdout(&output).contains("\tcontradicted\t") {
+        failures.push(stdout(&output));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn cleanliness_never_executes_configured_filters() {
+    let repository = Repository::new();
+    repository.write(".gitattributes", "a.txt filter=probe\n");
+    repository.write("a.txt", "before\n");
+    repository.commit();
+    let marker = repository.path().join("executed");
+    repository.git(&[
+        "config",
+        "filter.probe.clean",
+        &format!("touch '{}'; cat", marker.display()),
+    ]);
+    repository.write("a.txt", "change\n");
+    let output = repository.check("Tree is clean\n");
+    assert!(!marker.exists(), "configured filter executed: {output:?}");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+}
+
+#[test]
+fn clean_filter_preflight_ignores_inherited_config_file() {
+    let repository = Repository::new();
+    repository.write(".gitattributes", "a.txt filter=probe\n");
+    repository.write("a.txt", "before\n");
+    repository.commit();
+    let environment = [("GIT_CONFIG", "/dev/null")];
+    let output = repository.check_with("Tree is clean\n", &[], &environment);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+
+    repository.write("a.txt", "change\n");
+    let output = repository.check_with("Tree is clean\n", &[], &environment);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+
+    let marker = repository.path().join(".git/filter-executed");
+    repository.git(&[
+        "config",
+        "filter.probe.clean",
+        &format!("touch '{}'; cat", marker.display()),
+    ]);
+    let output = repository.check_with("Tree is clean\n", &[], &environment);
+    assert!(!marker.exists(), "configured filter executed: {output:?}");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_verdict(&output, 1, "working tree clean", "not checkable");
+    assert!(stdout(&output).contains("configured clean or process filters"));
+}
+
+#[test]
+fn terminal_output_escapes_direction_and_format_controls() {
+    let repository = Repository::new();
+    let output = repository.check(
+        "File \u{202e}detcidartnoc\tconfirmed exists\n\u{2066}hidden\u{2069}\n\u{200b}zero\n",
+    );
+    for c in ['\u{202e}', '\u{2066}', '\u{2069}', '\u{200b}'] {
+        assert!(
+            !stdout(&output).contains(c),
+            "raw format control in {}",
+            stdout(&output)
+        );
+    }
+    assert!(stdout(&output).contains("\\u{202e}"));
+}
+
+#[test]
+fn unverified_markdown_lines_prevent_success_in_both_output_formats() {
+    let repository = Repository::new();
+    repository.write("a.txt", "fixture\n");
+    repository.commit();
+    for line in [
+        "```cargo test``` failed on 5 suites",
+        "~~~cargo test~~~ failed",
+        "    # Indented claim",
+        "    ```",
+        "# Ran `cargo test`, 999 passed",
+    ] {
+        for args in [vec![], vec!["--json"]] {
+            let output = repository.check_with(&format!("Tree is clean\n{line}\n"), &args, &[]);
+            assert_eq!(output.status.code(), Some(3), "{line:?}: {output:?}");
+            if args.is_empty() {
+                assert_verdict(&output, 2, "unsupported", "not checkable");
+            } else {
+                let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(doc["summary"]["not_checkable"], 1);
+                assert_eq!(doc["exit_code"], 3);
+                assert_eq!(doc["statements"].as_array().unwrap().len(), 2);
+            }
+        }
+    }
+}
+
+#[test]
+fn matching_failure_counts_are_valid_evidence_and_stdout_is_not_runner_status() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mut failures = Vec::new();
+    for (command, body, passed, failed) in [
+        ("pytest", "1 failed, 7 passed in 0.10s\n", 7, 1),
+        (
+            "cargo test",
+            "running 8 tests\ntest result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\nerror: test failed, to rerun pass --lib\n",
+            7,
+            1,
+        ),
+        (
+            "jest",
+            "FAIL a.test.js\nTest Suites: 1 failed, 1 total\nTests: 1 failed, 7 passed, 8 total\n",
+            7,
+            1,
+        ),
+        (
+            "vitest",
+            "Test Files 1 failed (1)\nTests 7 passed | 1 failed (8)\n",
+            7,
+            1,
+        ),
+        (
+            "cargo test",
+            "running 7 tests\nFAIL case handled properly\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+            7,
+            0,
+        ),
+    ] {
+        fs::write(log.path(), format!("$ {command}\n{body}")).unwrap();
+        let output = repository.check_with(
+            &format!("Ran `{command}`, {passed} passed, {failed} failed\n"),
+            &["--log", &format!("{command}={}", log.path().display())],
+            &[],
+        );
+        if output.status.code() != Some(0) {
+            failures.push(stdout(&output));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn cargo_abnormal_exit_causes_are_independent_of_assertion_failure_counts() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let command = "cargo test -q --no-fail-fast";
+    let assertion = "running 1 test\nassertion --- FAILED\n\nfailures:\n    assertion\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\nerror: test failed, to rerun pass `--test a_assertion`\n";
+    for (tail, expected, verdict) in [
+        (
+            "error: test failed, to rerun pass `--test z_abnormal`\n\nCaused by:\n  process didn't exit successfully: `/tmp/fixture/target/debug/deps/z_abnormal-1234` (exit status: 4)\nerror: 2 targets failed:\n    `--test a_assertion`\n    `--test z_abnormal`\n",
+            1,
+            "contradicted",
+        ),
+        (
+            "Caused by:\n  process didn't exit successfully: `/tmp/fixture/target/debug/deps/z_abnormal-1234` (signal: 11, SIGSEGV: invalid memory reference)\n",
+            1,
+            "contradicted",
+        ),
+        (
+            "error: process didn't exit successfully: `/tmp/fixture/target/debug/deps/z_abnormal-1234` (exit status: 4)\n",
+            1,
+            "contradicted",
+        ),
+        (
+            "error: 1 target failed:\n    `--test a_assertion`\n",
+            0,
+            "confirmed",
+        ),
+        ("running 1 test\n", 3, "not checkable"),
+    ] {
+        fs::write(log.path(), format!("$ {command}\n{assertion}{tail}")).unwrap();
+        let mapping = format!("{command}={}", log.path().display());
+        let report = format!("Ran `{command}`, 0 passed, 1 failed\n");
+        let output = repository.check_with(&report, &["--log", &mapping], &[]);
+        assert_eq!(output.status.code(), Some(expected), "{}", stdout(&output));
+        assert_verdict(&output, 1, "test counts in supplied log", verdict);
+
+        let output = repository.check_with(&report, &["--log", &mapping, "--json"], &[]);
+        assert_eq!(output.status.code(), Some(expected), "{}", stdout(&output));
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["exit_code"], expected);
+        assert_eq!(json["statements"][0]["verdict"], verdict);
+    }
+}
+
+#[test]
+fn reported_failures_do_not_resolve_ambiguous_test_counts() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    for (command, body) in [
+        ("cargo test", "error: test failed, to rerun pass `--lib`\n"),
+        (
+            "cargo test",
+            "running 1 test\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\nerror: test failed, to rerun pass `--lib`\n     Running tests/later.rs (target/debug/deps/later-1234)\n",
+        ),
+        ("jest", "FAIL assertion.test.js\nTests: 1 failed,\n"),
+        ("npx jest", "Test Suites: 1 failed, 1 total\nTests:\n"),
+        ("vitest", "Test Files 1 failed (1)\nTests 1 failed (\n"),
+        ("npx vitest", "FAIL assertion.test.js\n"),
+        ("pytest", "1 failed in\n"),
+    ] {
+        fs::write(log.path(), format!("$ {command}\n{body}")).unwrap();
+        let output = repository.check_with(
+            &format!("Ran `{command}`, 0 passed, 1 failed\n"),
+            &["--log", &format!("{command}={}", log.path().display())],
+            &[],
+        );
+        assert_eq!(output.status.code(), Some(3), "{}", stdout(&output));
+        assert_verdict(&output, 1, "test counts in supplied log", "not checkable");
+    }
+}
+
+#[test]
+fn additions_and_deletions_check_endpoints_despite_rename_similarity() {
+    let repository = Repository::new();
+    repository.write("old.rs", "same content\n");
+    let base = repository.commit();
+    repository.git(&["mv", "old.rs", "new.rs"]);
+    repository.commit();
+    let output = repository.check_with(
+        "Added new.rs\nCreated new.rs\nDeleted old.rs\nRenamed old.rs to new.rs\n",
+        &["--base", &base],
+        &[],
+    );
+    for line in 1..=4 {
+        assert_verdict(&output, line, "committed path action", "confirmed");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn file_presence_does_not_resolve_intermediate_symlinks() {
+    let repository = Repository::new();
+    repository.write("sub/file.txt", "fixture\n");
+    std::os::unix::fs::symlink("sub", repository.path().join("dir_link")).unwrap();
+    repository.commit();
+    let output = repository.check("File dir_link/file.txt exists\nFile sub/file.txt exists\n");
+    assert_verdict(&output, 1, "file at HEAD", "contradicted");
+    assert_verdict(&output, 2, "file at HEAD", "confirmed");
+}
+
+#[test]
+fn rename_separator_is_case_insensitive_and_outside_path_quotes() {
+    let repository = Repository::new();
+    repository.write("old to name.txt", "fixture\n");
+    let base = repository.commit();
+    repository.git(&["mv", "old to name.txt", "new name.txt"]);
+    repository.commit();
+    for report in [
+        "Renamed `old to name.txt` to `new name.txt`\n",
+        "RENAMED `old to name.txt` TO `new name.txt`\n",
+        "Renamed `new name.txt`\n",
+    ] {
+        let output = repository.check_with(report, &["--base", &base], &[]);
+        assert_eq!(output.status.code(), Some(0), "{report}: {output:?}");
+    }
+}
+
+#[test]
+fn log_flags_accept_commands_with_equals_arguments() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let command = "pytest --maxfail=1";
+    fs::write(log.path(), format!("$ {command}\n7 passed in 0.10s\n")).unwrap();
+    let output = repository.check_with(
+        &format!("Ran `{command}`, 7 passed\n"),
+        &["--log", &format!("{command}={}", log.path().display())],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+}
+
+#[test]
+fn normal_stdout_is_not_an_extra_test_summary() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mut failures = Vec::new();
+    for (command, body) in [
+        (
+            "pytest",
+            "100 items processed in 0.05s\n================ 7 passed in 0.10s ================\n",
+        ),
+        ("jest", "Tests for login module\nTests: 7 passed, 7 total\n"),
+    ] {
+        fs::write(log.path(), format!("$ {command}\n{body}")).unwrap();
+        let output = repository.check_with(
+            &format!("Ran `{command}`, 7 passed\n"),
+            &["--log", &format!("{command}={}", log.path().display())],
+            &[],
+        );
+        if output.status.code() != Some(0) {
+            failures.push(stdout(&output));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn parenthesized_cargo_stdout_preserves_a_completed_suite() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let command = "cargo test -- --nocapture";
+    fs::write(
+        log.path(),
+        format!("$ {command}\n     Running tests/query.rs (target/debug/deps/query-1234)\nrunning 1 test\nRunning query (cached)\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"),
+    )
+    .unwrap();
+    let output = repository.check_with(
+        &format!("Ran `{command}`, 1 passed\n"),
+        &["--log", &format!("{command}={}", log.path().display())],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stdout(&output));
+    assert_verdict(&output, 1, "test counts in supplied log", "confirmed");
+}
+
+#[test]
+fn cargo_stdout_does_not_announce_a_suite_but_runner_status_does() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let command = "cargo test -- --nocapture";
+    let announcement = "     Running unittests src/lib.rs (target/debug/deps/fixture-1234)";
+    let summary = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s";
+    for output_line in [
+        "Running initialization",
+        "Running query (cached)",
+        "Running initialization (phase one)",
+        "     Running query (cached)",
+        "note:      Running tests/query.rs (target/debug/deps/query-1234)",
+    ] {
+        for body in [
+            format!("{announcement}\nrunning 1 test\n{output_line}\n{summary}\n"),
+            format!("{output_line}\n{announcement}\nrunning 1 test\n{summary}\n"),
+            format!("{announcement}\nrunning 1 test\n{summary}\n{output_line}\n"),
+        ] {
+            fs::write(log.path(), format!("$ {command}\n{body}")).unwrap();
+            let output = repository.check_with(
+                &format!("Ran `{command}`, 1 passed\n"),
+                &["--log", &format!("{command}={}", log.path().display())],
+                &[],
+            );
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{body:?}: {}",
+                stdout(&output)
+            );
+            assert_verdict(&output, 1, "test counts in supplied log", "confirmed");
+        }
+    }
+
+    for next_suite in [
+        "     Running unittests src/other.rs (target/debug/deps/other-1234)",
+        "     Running tests/other.rs (target/debug/deps/other-1234)",
+        "     Running checks/custom (target/debug/deps/custom-1234)",
+        "   Doc-tests fixture",
+        "Running tests/query.rs (target/debug/deps/query-1234)",
+        "Running unittests src/lib.rs",
+        "Running tests/query.rs",
+        "Doc-tests fixture",
+        "     Running unittests src/other.rs",
+        "     Running tests/other.rs",
+        "     Running checks/custom (",
+        "     Running tests/other.rs (target/debug/deps/other-1234) trailing",
+        "   Doc-tests fixture trailing",
+        "     Running ",
+        "   Doc-tests ",
+    ] {
+        for body in [
+            format!("{announcement}\n{next_suite}\nrunning 1 test\n{summary}\n"),
+            format!("{announcement}\nrunning 1 test\n{next_suite}\n{summary}\n"),
+            format!("{announcement}\nrunning 1 test\n{summary}\n{next_suite}\n"),
+            format!("{announcement}\nrunning 1 test\n{summary}\n{next_suite}\nrunning 2 tests\n"),
+        ] {
+            fs::write(log.path(), format!("$ {command}\n{body}")).unwrap();
+            let output = repository.check_with(
+                &format!("Ran `{command}`, 1 passed\n"),
+                &["--log", &format!("{command}={}", log.path().display())],
+                &[],
+            );
+            assert_eq!(
+                output.status.code(),
+                Some(3),
+                "{body:?}: {}",
+                stdout(&output)
+            );
+            assert_verdict(&output, 1, "test counts in supplied log", "not checkable");
+        }
+    }
+
+    let body = format!(
+        "{announcement}\nrunning 1 test\n{summary}\n     Running tests/query.rs (target/debug/deps/query-1234)\nrunning 1 test\nRunning query (cached)\n{summary}\n   Doc-tests fixture\nrunning 1 test\n{summary}\n"
+    );
+    fs::write(log.path(), format!("$ {command}\n{body}")).unwrap();
+    let output = repository.check_with(
+        &format!("Ran `{command}`, 3 passed\n"),
+        &["--log", &format!("{command}={}", log.path().display())],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stdout(&output));
+    assert_verdict(&output, 1, "test counts in supplied log", "confirmed");
+}
+
+#[test]
+fn incomplete_summaries_cannot_leave_a_completed_summary_confirmed() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mut failures = Vec::new();
+    for (command, complete, incomplete, passed) in [
+        ("vitest", "Tests 1 passed (1)", "Tests 1 failed (", 1),
+        ("jest", "Tests: 1 passed, 1 total", "Tests:", 1),
+        ("pytest", "7 passed in 0.10s", "=== 3 failed, 7 pa", 7),
+        ("pytest", "7 passed in 0.10s", "7 passed in", 7),
+    ] {
+        for body in [
+            format!("{complete}\n{incomplete}\n"),
+            format!("{incomplete}\n{complete}\n"),
+            format!("{incomplete}\n"),
+        ] {
+            fs::write(log.path(), format!("$ {command}\n{body}")).unwrap();
+            let output = repository.check_with(
+                &format!("Ran `{command}`, {passed} passed\n"),
+                &["--log", &format!("{command}={}", log.path().display())],
+                &[],
+            );
+            if output.status.code() != Some(3) {
+                failures.push(format!("{body:?}: {}", stdout(&output)));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn suite_loading_errors_cannot_be_accounted_for_by_failed_test_counts() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    for command in ["jest", "npx jest"] {
+        for (diagnostic, suites, expected) in [
+            (
+                "FAIL load.test.js\n  Test suite failed to run\n    Cannot find module './missing'\n",
+                2,
+                1,
+            ),
+            (
+                "FAIL load.test.js\n  ● Test suite failed to run\n    Cannot find module './missing'\n",
+                2,
+                1,
+            ),
+            ("", 1, 0),
+        ] {
+            fs::write(
+                log.path(),
+                format!("$ {command}\n{diagnostic}FAIL assertion.test.js\nTest Suites: {suites} failed, {suites} total\nTests: 1 failed, 1 total\n"),
+            )
+            .unwrap();
+            let output = repository.check_with(
+                &format!("Ran `{command}`, 0 passed, 1 failed\n"),
+                &["--log", &format!("{command}={}", log.path().display())],
+                &[],
+            );
+            assert_eq!(output.status.code(), Some(expected), "{}", stdout(&output));
+            assert_verdict(
+                &output,
+                1,
+                "test counts in supplied log",
+                if expected == 1 {
+                    "contradicted"
+                } else {
+                    "confirmed"
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn pytest_collection_errors_cannot_be_accounted_for_by_failed_test_counts() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    for heading in [
+        "_____ ERROR collecting test_broken.py _____",
+        "ERROR collecting test_broken.py",
+    ] {
+        fs::write(
+            log.path(),
+            format!("$ pytest\n{heading}\n1 error in 0.10s\n"),
+        )
+        .unwrap();
+        let output = repository.check_with(
+            "Ran `pytest`, 0 passed, 1 failed\n",
+            &["--log", &format!("pytest={}", log.path().display())],
+            &[],
+        );
+        assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+        assert_verdict(&output, 1, "test counts in supplied log", "contradicted");
+    }
+
+    fs::write(
+        log.path(),
+        "$ pytest\n_____ test_assertion _____\nE assert 1 == 2\n1 failed in 0.10s\n",
+    )
+    .unwrap();
+    let output = repository.check_with(
+        "Ran `pytest`, 0 passed, 1 failed\n",
+        &["--log", &format!("pytest={}", log.path().display())],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stdout(&output));
+    assert_verdict(&output, 1, "test counts in supplied log", "confirmed");
+}
+
+#[test]
+fn runner_diagnostics_are_scoped_to_the_command_family() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mut failures = Vec::new();
+    for (command, family, summary) in [
+        (
+            "cargo test",
+            "cargo",
+            "running 1 test\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+        ),
+        ("pytest -s", "pytest", "1 passed in 0.10s\n"),
+        ("vitest", "javascript", "Tests 1 passed (1)\n"),
+        ("npx vitest", "javascript", "Tests 1 passed (1)\n"),
+        ("jest", "javascript", "Tests: 1 passed, 1 total\n"),
+        ("npx jest", "javascript", "Tests: 1 passed, 1 total\n"),
+    ] {
+        for (origin, diagnostic) in [
+            ("cargo", "error: could not compile fixture"),
+            (
+                "cargo",
+                "error: process didn't exit successfully: signal: 11",
+            ),
+            (
+                "cargo",
+                "  process didn't exit successfully: `target/debug/deps/fixture` (exit status: 4)",
+            ),
+            ("cargo", "error: test failed, to rerun pass --lib"),
+            ("cargo", "error: 1 target failed:"),
+            ("cargo", "test result: FAILED."),
+            ("pytest", "INTERNALERROR> RuntimeError: fixture"),
+            ("pytest", "ERROR collecting tests/test_fixture.py"),
+            (
+                "pytest",
+                "_____ ERROR collecting tests/test_fixture.py _____",
+            ),
+            ("javascript", "Unhandled Errors"),
+            ("javascript", "Errors 1 error"),
+            ("javascript", "Type Errors 1 error"),
+            ("javascript", "FAIL fixture.test.js"),
+            ("javascript", "Test Suites: 1 failed, 1 total"),
+            ("javascript", "Test Files 1 failed (1)"),
+        ] {
+            fs::write(log.path(), format!("$ {command}\n{diagnostic}\n{summary}")).unwrap();
+            let output = repository.check_with(
+                &format!("Ran `{command}`, 1 passed\n"),
+                &["--log", &format!("{command}={}", log.path().display())],
+                &[],
+            );
+            let expected = if family == origin { 1 } else { 0 };
+            if output.status.code() != Some(expected) {
+                failures.push(format!("{command}, {diagnostic:?}: {}", stdout(&output)));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn all_file_actions_refuse_submodule_entries() {
+    let repository = Repository::new();
+    repository.write("a.txt", "fixture\n");
+    let hash = repository.commit();
+    repository.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("160000,{hash},sub"),
+    ]);
+    repository.git(&["commit", "-m", "Add link"]);
+    let base = repository.git(&["rev-parse", "HEAD"]);
+    repository.git(&["update-index", "--force-remove", "sub"]);
+    repository.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("160000,{hash},newsub"),
+    ]);
+    repository.git(&["commit", "-m", "Move link"]);
+    let output = repository.check_with(
+        "Deleted sub\nRenamed sub to newsub\n",
+        &["--base", &base],
+        &[],
+    );
+    for line in 1..=2 {
+        assert_verdict(&output, line, "committed path action", "not checkable");
+    }
+}
+
+#[test]
+fn clean_checks_from_subdirectories_inspect_all_index_flags() {
+    let repository = Repository::new();
+    repository.write("src/a.txt", "fixture\n");
+    repository.write("outside.txt", "before\n");
+    repository.commit();
+    repository.git(&["update-index", "--skip-worktree", "outside.txt"]);
+    repository.write("outside.txt", "after\n");
+    let output = repository.check_with(
+        "Tree is clean\n",
+        &["--repo", repository.path().join("src").to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+}
+
+#[test]
+fn list_code_indentation_counts_tab_columns() {
+    let repository = Repository::new();
+    repository.write("a.txt", "fixture\n");
+    repository.commit();
+    let output = repository.check("- \t\tTree is clean\n");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+}
+
+#[test]
+fn list_padding_tabs_include_the_original_marker_column() {
+    let repository = Repository::new();
+    repository.write("a.txt", "fixture\n");
+    repository.commit();
+    for (report, expected) in [
+        ("  - \tTree is clean\n", 3),
+        ("  * \tTree is clean\n", 3),
+        ("1. \t\tTree is clean\n", 3),
+        ("  -\tTree is clean\n", 0),
+        (" - \tTree is clean\n", 0),
+        ("  -    Tree is clean\n", 0),
+    ] {
+        for args in [vec![], vec!["--json"]] {
+            let output = repository.check_with(report, &args, &[]);
+            assert_eq!(
+                output.status.code(),
+                Some(expected),
+                "{report:?}: {}",
+                stdout(&output)
+            );
+            if args.is_empty() {
+                assert_verdict(
+                    &output,
+                    1,
+                    if expected == 3 {
+                        "unsupported"
+                    } else {
+                        "working tree clean"
+                    },
+                    if expected == 3 {
+                        "not checkable"
+                    } else {
+                        "confirmed"
+                    },
+                );
+            } else {
+                let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(doc["exit_code"], expected);
+                assert_eq!(
+                    doc["summary"]["confirmed"],
+                    if expected == 0 { 1 } else { 0 }
+                );
+                assert_eq!(
+                    doc["summary"]["not_checkable"],
+                    if expected == 3 { 1 } else { 0 }
+                );
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn pushed_hashes_reject_prefix_collisions_across_object_types() {
+    let repository = Repository::new();
+    repository.git(&["hash-object", "-w", "-t", "tree", "/dev/null"]);
+    repository.write("commit-input", "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nPrefix fixture 10484\n");
+    let commit = repository.git(&["hash-object", "-w", "-t", "commit", "commit-input"]);
+    repository.write("blob-input", "prefix fixture blob 34141\n");
+    let blob = repository.git(&["hash-object", "-w", "blob-input"]);
+    assert_eq!(&commit[..7], "b01b666");
+    assert_eq!(&blob[..7], "b01b666");
+    repository.git(&["update-ref", "refs/remotes/origin/main", &commit]);
+    let output = repository.check_with(
+        "Pushed b01b666\nNot pushed b01b666\n",
+        &["--remote-ref", "refs/remotes/origin/main"],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    for line in 1..=2 {
+        assert_verdict(
+            &output,
+            line,
+            "local tracking ref ancestry",
+            "not checkable",
+        );
+    }
+}
+
+#[test]
+fn real_vitest_runs_separate_counted_failures_from_errors_outside_the_counts() {
+    // Captured from Vitest 3.2.4 with colors disabled, stdout and stderr merged
+    // unless the name ends in -stdout; only the project path on the RUN line
+    // was replaced. Its Type Errors line
+    // counts failed type tests, which the Tests line already includes. Failed
+    // suites and unhandled errors are outside the Tests count.
+    let repository = Repository::new();
+    // Cargo runs integration tests from the package root. A relative path
+    // keeps the checkout's own name, which may contain the `=` that --log
+    // splits on, out of the log mapping.
+    let fixtures = Path::new("tests/fixtures/vitest-3.2.4");
+    for (fixture, command, counts, verdict) in [
+        (
+            "assertion",
+            "npx vitest run",
+            "0 passed, 1 failed",
+            "confirmed",
+        ),
+        ("pass", "npx vitest run", "1 passed", "confirmed"),
+        (
+            "type-test",
+            "npx vitest run --typecheck",
+            "0 passed, 1 failed",
+            "confirmed",
+        ),
+        (
+            "type-test",
+            "npx vitest run --typecheck",
+            "0 passed",
+            "contradicted",
+        ),
+        (
+            "type-and-assertion",
+            "npx vitest run --typecheck",
+            "0 passed, 2 failed",
+            "confirmed",
+        ),
+        (
+            "type-pass",
+            "npx vitest run --typecheck",
+            "1 passed",
+            "confirmed",
+        ),
+        (
+            "type-outside-test",
+            "npx vitest run --typecheck",
+            "1 passed",
+            "contradicted",
+        ),
+        (
+            "source-type-error",
+            "npx vitest run --typecheck",
+            "1 passed",
+            "contradicted",
+        ),
+        (
+            "failed-suite",
+            "npx vitest run",
+            "0 passed, 1 failed",
+            "contradicted",
+        ),
+        (
+            "failed-hook",
+            "npx vitest run",
+            "0 passed, 1 failed",
+            "contradicted",
+        ),
+        (
+            "unhandled-error",
+            "npx vitest run",
+            "1 passed",
+            "contradicted",
+        ),
+        // Stdout only: the Failed Suites banner went to stderr, so only the
+        // failed-file total exceeding the failed-test total shows the file
+        // that failed outside its tests.
+        (
+            "failed-suite-stdout",
+            "npx vitest run",
+            "0 passed, 1 failed",
+            "contradicted",
+        ),
+        (
+            "failed-hook-stdout",
+            "npx vitest run",
+            "0 passed, 1 failed",
+            "contradicted",
+        ),
+        (
+            "two-failures-one-file-stdout",
+            "npx vitest run",
+            "0 passed, 2 failed",
+            "confirmed",
+        ),
+    ] {
+        let log = fixtures.join(format!("{fixture}.log"));
+        let mapping = format!("{command}={}", log.display());
+        let report = format!("Ran `{command}`, {counts}\n");
+        let expected = if verdict == "confirmed" { 0 } else { 1 };
+        let output = repository.check_with(&report, &["--log", &mapping], &[]);
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "{fixture}: {}",
+            stdout(&output)
+        );
+        assert_verdict(&output, 1, "test counts in supplied log", verdict);
+
+        let output = repository.check_with(&report, &["--log", &mapping, "--json"], &[]);
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["exit_code"], expected, "{fixture}");
+        assert_eq!(json["statements"][0]["verdict"], verdict, "{fixture}");
+    }
+}
+
+#[test]
+fn real_cargo_runs_contradict_targets_that_never_ran_or_exited_abnormally() {
+    // Captured from Cargo 1.100 with colors off, stdout and stderr merged;
+    // only the fixture project path was replaced. In the launch failures an
+    // earlier test removed a later test binary, so Cargo printed `could not
+    // execute process ... (never executed)` and that target counted nothing.
+    let repository = Repository::new();
+    let fixtures = Path::new("tests/fixtures/cargo-1.100");
+    for (fixture, command, counts, verdict) in [
+        (
+            "launch-failure-quiet",
+            "cargo test -q --no-fail-fast",
+            "0 passed, 1 failed",
+            "contradicted",
+        ),
+        (
+            "launch-failure",
+            "cargo test --no-fail-fast",
+            "0 passed, 1 failed",
+            "contradicted",
+        ),
+        (
+            "signal-quiet",
+            "cargo test -q --no-fail-fast",
+            "0 passed, 1 failed",
+            "contradicted",
+        ),
+        (
+            "assertion-quiet",
+            "cargo test -q --no-fail-fast",
+            "1 passed, 1 failed",
+            "confirmed",
+        ),
+        (
+            "assertion-quiet",
+            "cargo test -q --no-fail-fast",
+            "1 passed",
+            "contradicted",
+        ),
+    ] {
+        let log = fixtures.join(format!("{fixture}.log"));
+        let mapping = format!("{command}={}", log.display());
+        let report = format!("Ran `{command}`, {counts}\n");
+        let expected = if verdict == "confirmed" { 0 } else { 1 };
+        let output = repository.check_with(&report, &["--log", &mapping], &[]);
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "{fixture} {counts}: {}",
+            stdout(&output)
+        );
+        assert_verdict(&output, 1, "test counts in supplied log", verdict);
+
+        let output = repository.check_with(&report, &["--log", &mapping, "--json"], &[]);
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["exit_code"], expected, "{fixture} {counts}");
+        assert_eq!(
+            json["statements"][0]["verdict"], verdict,
+            "{fixture} {counts}"
+        );
     }
 }

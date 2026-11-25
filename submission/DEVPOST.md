@@ -24,13 +24,22 @@ Author disclosure: [List the AI coding tools used before submitting.]
 ## Limits
 
 Supplied logs establish only what their text records, not whether an authentic command ran in this checkout.
+Incomplete additional summaries stay not checkable, and matching failure counts cannot account for runner execution errors.
+Pytest collection errors also prevent confirmation when the reported failure count matches.
+Cargo announcements require their complete padded line shapes, and ordinary output such as `Running query (cached)` does not start a suite.
+Malformed, whitespace-altered, unfinished, or conflicting announcement-shaped lines remain not checkable.
 A local tracking ref can be stale and cannot establish the server's present state or prove a push happened.
 Diff checks compare committed endpoint trees and do not establish everything edited during a session.
 The parser accepts documented statement forms rather than arbitrary prose.
+Headings and unsupported assertions remain visible as not checkable and prevent a successful CI exit.
+Cleanliness stays not checkable for configured filters, hidden index flags, or submodule worktrees.
+Git execution precautions do not establish authenticity of a repository or make Git a sandbox.
+Log mappings split at the final equals sign; log paths containing equals signs are unsupported.
 The program cannot prove code quality, authorship, or completeness.
 
 ## Before submission
 
-The author must confirm student and age eligibility, register, publish the source code, add its URL, complete the disclosure above, and record and upload a video of at most three minutes.
+The source is published at https://github.com/bananatruck/agent-receipts.
+The author must confirm student and age eligibility, register, complete the disclosure above, and record and upload a video of at most three minutes.
 The intended track is AI, Agentic Systems, Cybersecurity, and Dev Tools.
-No public repository, video upload, registration, or submission is claimed here.
+No video upload, registration, or submission is claimed here.
