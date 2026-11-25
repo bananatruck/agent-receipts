@@ -102,8 +102,14 @@ The small cargo parser sums completed `test result: ok.` or `test result: FAILED
 A summary must include passed, failed, ignored, measured, filtered-out, and elapsed-seconds fields.
 Each summary requires a preceding `running N tests` header whose count equals passed plus failed plus ignored plus measured.
 A summary without a header, a mismatched total, a duplicate summary, or a suite-start line without a completed summary makes counts not checkable.
-Cargo runner announcements are recognized by unit-test labels, Rust source paths, or executable parentheses, including recognizable partial announcements.
-Ordinary stdout such as `Running initialization` does not start a suite, while output resembling runner status is treated conservatively.
+Cargo suite announcements match entire raw lines, preserving their whitespace.
+An executable announcement has five leading ASCII spaces, `Running `, an optional `unittests ` label, the source path, and a parenthesized executable path separated by one space.
+The executable path must contain a forward or backward slash and may use a custom target directory or contain spaces.
+A doc-test announcement has three leading ASCII spaces, `Doc-tests `, and a nonempty crate name containing only letters, digits, underscores, or hyphens.
+Cargo writes these announcements to stderr, while the test harness writes running-count headers and summaries to stdout.
+Merged logs do not preserve stream identity or establish authenticity.
+Malformed or whitespace-altered announcement-shaped lines are ambiguous and make counts not checkable.
+Ordinary stdout such as `Running initialization` or `Running query (cached)` does not start a suite.
 The pytest parser accepts exactly one final count list followed by `in <seconds>s`, optionally surrounded by equals signs or followed by a duration annotation.
 It recognizes passed, failed, errors, skipped, deselected, expected-failure, unexpected-pass, and warning categories using their standard summary tokens.
 Errors contribute to the failure count.

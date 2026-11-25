@@ -101,38 +101,112 @@ impl Logs {
     }
 }
 
+#[derive(Debug, PartialEq)]
+enum CargoLine {
+    SuiteStart,
+    Ambiguous,
+    Output,
+}
+
+fn cargo_line(line: &str) -> CargoLine {
+    // Cargo writes these padded status labels to stderr. Preserve their spaces
+    // in merged logs, where test output can also contain Running or Doc-tests.
+    if let Some(name) = line.strip_prefix("   Doc-tests ") {
+        return if !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
+            CargoLine::SuiteStart
+        } else {
+            CargoLine::Ambiguous
+        };
+    }
+    if line.trim_start().starts_with("Doc-tests ") {
+        return CargoLine::Ambiguous;
+    }
+    let (payload, padded) = if let Some(payload) = line.strip_prefix("     Running ") {
+        (payload, true)
+    } else if let Some(payload) = line.trim_start().strip_prefix("Running ") {
+        (payload, false)
+    } else {
+        return CargoLine::Output;
+    };
+    let source = payload.strip_prefix("unittests ").unwrap_or(payload);
+    if let Some((source, executable)) = source.strip_suffix(')').and_then(|s| s.split_once(" (")) {
+        // Target directories can be absolute, renamed, or contain spaces.
+        // A bare parenthesized word, such as (cached), is not a target path.
+        if !source.is_empty()
+            && source.trim() == source
+            && executable.trim() == executable
+            && executable.contains(['/', '\\'])
+        {
+            // A path-shaped line with altered padding is ambiguous evidence,
+            // not an announcement or safely ignorable ordinary output.
+            return if padded {
+                CargoLine::SuiteStart
+            } else {
+                CargoLine::Ambiguous
+            };
+        }
+    }
+    if payload.is_empty()
+        || payload == "unittests"
+        || payload.starts_with("unittests ")
+        || payload.contains(['/', '\\'])
+        || payload
+            .split(" (")
+            .next()
+            .is_some_and(|s| s.ends_with(".rs"))
+    {
+        CargoLine::Ambiguous
+    } else {
+        CargoLine::Output
+    }
+}
+
+enum CargoSuite {
+    Idle,
+    Announced,
+    Running(u64),
+}
+
 pub fn cargo_summary(text: &str) -> Option<Counts> {
     static SUMMARY: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"^test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured; [0-9]+ filtered out; finished in [0-9.]+s$").unwrap()
     });
     static RUNNING: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"^running ([0-9]+) tests?$").unwrap());
-    static ANNOUNCEMENT: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"^Running (?:unittests(?: |$)|.*\.rs(?: |$)|.* \()").unwrap());
     let mut total = Counts {
         passed: 0,
         failed: 0,
     };
     let mut found = false;
-    let mut announced = false;
-    let mut running = None;
-    for line in text.lines().map(str::trim) {
-        if ANNOUNCEMENT.is_match(line) || line.starts_with("Doc-tests ") {
-            if announced || running.is_some() {
-                return None;
+    let mut suite = CargoSuite::Idle;
+    for raw in text.lines() {
+        match cargo_line(raw) {
+            CargoLine::SuiteStart => {
+                if !matches!(suite, CargoSuite::Idle) {
+                    return None;
+                }
+                suite = CargoSuite::Announced;
             }
-            announced = true;
+            CargoLine::Ambiguous => return None,
+            CargoLine::Output => {}
         }
+        let line = raw.trim();
         if let Some(c) = RUNNING.captures(line) {
-            if running.is_some() {
+            if matches!(suite, CargoSuite::Running(_)) {
                 return None;
             }
-            running = Some(c[1].parse::<u64>().ok()?);
+            suite = CargoSuite::Running(c[1].parse::<u64>().ok()?);
         }
         if !line.starts_with("test result:") {
             continue;
         }
-        let expected = running.take()?;
+        let CargoSuite::Running(expected) = suite else {
+            return None;
+        };
         let c = SUMMARY.captures(line)?;
         let passed: u64 = c[2].parse().ok()?;
         let failed: u64 = c[3].parse().ok()?;
@@ -150,14 +224,82 @@ pub fn cargo_summary(text: &str) -> Option<Counts> {
         total.passed = total.passed.checked_add(passed)?;
         total.failed = total.failed.checked_add(failed)?;
         found = true;
-        announced = false;
+        suite = CargoSuite::Idle;
     }
-    (found && !announced && running.is_none()).then_some(total)
+    (found && matches!(suite, CargoSuite::Idle)).then_some(total)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cargo_announcements_require_complete_padded_status_lines() {
+        for (line, expected) in [
+            (
+                "     Running unittests src/lib.rs (target/debug/build/fixture/5a77203016da995e/out/fixture-5a77203016da995e)",
+                CargoLine::SuiteStart,
+            ),
+            (
+                "     Running unittests src/main.rs (target/debug/deps/fixture-1234)",
+                CargoLine::SuiteStart,
+            ),
+            (
+                "     Running tests/cli.rs (target/debug/build/fixture/075ffe448785b417/out/cli-075ffe448785b417)",
+                CargoLine::SuiteStart,
+            ),
+            (
+                "     Running checks/custom (/tmp/custom target/debug/deps/custom-1234)",
+                CargoLine::SuiteStart,
+            ),
+            (
+                r"     Running tests\cli.rs (C:\custom target\debug\deps\cli-1234.exe)",
+                CargoLine::SuiteStart,
+            ),
+            ("   Doc-tests agent_receipts", CargoLine::SuiteStart),
+            ("Running query (cached)", CargoLine::Output),
+            ("     Running query (cached)", CargoLine::Output),
+            ("Running initialization (phase one)", CargoLine::Output),
+            (
+                "Running unittests src/lib.rs (target/debug/deps/fixture-1234)",
+                CargoLine::Ambiguous,
+            ),
+            (
+                "    Running tests/cli.rs (target/debug/deps/cli-1234)",
+                CargoLine::Ambiguous,
+            ),
+            (
+                "      Running tests/cli.rs (target/debug/deps/cli-1234)",
+                CargoLine::Ambiguous,
+            ),
+            (
+                "\tRunning tests/cli.rs (target/debug/deps/cli-1234)",
+                CargoLine::Ambiguous,
+            ),
+            ("Doc-tests agent_receipts", CargoLine::Ambiguous),
+            ("    Doc-tests agent_receipts", CargoLine::Ambiguous),
+            ("   Doc-tests agent_receipts extra", CargoLine::Ambiguous),
+            ("   Doc-tests agent_receipts ", CargoLine::Ambiguous),
+            ("   Doc-tests ", CargoLine::Ambiguous),
+            ("     Running unittests src/lib.rs", CargoLine::Ambiguous),
+            (
+                "     Running tests/cli.rs (target/debug/deps/cli-1234",
+                CargoLine::Ambiguous,
+            ),
+            (
+                "     Running tests/cli.rs (target/debug/deps/cli-1234) trailing",
+                CargoLine::Ambiguous,
+            ),
+            (
+                "     Running tests/cli.rs (target/debug/deps/cli-1234) ",
+                CargoLine::Ambiguous,
+            ),
+            ("     Running tests/cli.rs (", CargoLine::Ambiguous),
+            ("     Running ", CargoLine::Ambiguous),
+        ] {
+            assert_eq!(cargo_line(line), expected, "{line:?}");
+        }
+    }
 
     #[test]
     fn cargo_summaries_add_completed_suites_and_preserve_failures() {
