@@ -2072,3 +2072,56 @@ fn malformed_vitest_file_totals_cannot_determine_a_verdict() {
         }
     }
 }
+
+#[test]
+fn fences_distinguish_ascii_closers_and_single_tilde_info() {
+    let repository = Repository::new();
+    repository.write("a.txt", "fixture\n");
+    repository.commit();
+    let mut failures = Vec::new();
+    for (report, confirmed) in [
+        ("```\n\u{a0}```\nTree is clean\n", 0),
+        ("```\n```\u{a0}\nTree is clean\n", 0),
+        ("```\n\u{2003}```\nTree is clean\n", 0),
+        ("```\n```\u{2003}\nTree is clean\n", 0),
+        ("```\n  ``` \t\nTree is clean\n", 1),
+        ("~~~ text title=\"a~b\"\nTree is clean\n~~~\n", 0),
+        ("~~~ text title=\"a~b~c\"\nTree is clean\n~~~\n", 0),
+        ("``` text title=\"a`b\"\nTree is clean\n", 1),
+        ("~~~cargo test~~~ failed\nTree is clean\n", 1),
+    ] {
+        for json in [false, true] {
+            let args = if json { vec!["--json"] } else { vec![] };
+            let output = repository.check_with(report, &args, &[]);
+            let actual = if json {
+                let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(doc["exit_code"], output.status.code().unwrap());
+                doc["summary"]["confirmed"].as_u64().unwrap()
+            } else {
+                stdout(&output).matches("\tconfirmed\t").count() as u64
+            };
+            let expected_exit = if report == "```\n  ``` \t\nTree is clean\n" {
+                0
+            } else {
+                3
+            };
+            assert_eq!(
+                output.status.code(),
+                Some(expected_exit),
+                "{report:?}: {output:?}"
+            );
+            if confirmed == 0 && !json {
+                let tree_line = report
+                    .lines()
+                    .position(|line| line == "Tree is clean")
+                    .unwrap()
+                    + 1;
+                assert_verdict(&output, tree_line, "unsupported", "not checkable");
+            }
+            if actual != confirmed {
+                failures.push(format!("{report:?}: {}", stdout(&output)));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

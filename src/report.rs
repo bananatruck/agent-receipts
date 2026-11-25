@@ -99,7 +99,9 @@ pub fn parse(text: &str) -> Vec<Statement> {
             let delimiter = if fence.is_none() {
                 content.as_ref()
             } else {
-                source
+                // CommonMark 0.31.2 section 4.5: closing fences permit
+                // ASCII spaces and tabs, not Unicode whitespace.
+                raw.trim_start_matches([' ', '\t'])
             };
             if !indented && !list_code {
                 if let Some((marker, length)) = fence_marker(delimiter) {
@@ -111,7 +113,7 @@ pub fn parse(text: &str) -> Vec<Statement> {
                         Some((opening, minimum))
                             if marker == opening
                                 && length >= minimum
-                                && delimiter[length..].trim().is_empty() =>
+                                && delimiter[length..].trim_matches([' ', '\t']).is_empty() =>
                         {
                             fence = None;
                             return None;
@@ -159,7 +161,15 @@ fn fence_marker(line: &str) -> Option<(char, usize)> {
         return None;
     }
     let length = line.chars().take_while(|&value| value == marker).count();
-    (length >= 3 && !line[length..].contains(marker)).then_some((marker, length))
+    let info = &line[length..];
+    // Backtick info strings cannot contain backticks. Tilde info may contain
+    // single tildes; repeated tildes stay visible as unsupported inline spans.
+    let valid_info = match marker {
+        '`' => !info.contains('`'),
+        '~' => !info.contains("~~"),
+        _ => unreachable!(),
+    };
+    (length >= 3 && valid_info).then_some((marker, length))
 }
 
 fn argument(value: &str) -> Option<&str> {
