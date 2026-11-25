@@ -150,6 +150,7 @@ Ordinary assertion failures exit with status 101 and omit that cause, so matchin
 Jest suite-loading errors also contradict a statement that accurately reports assertion failure counts.
 A validated Jest failed-suite count above the failed-test count proves a suite execution error and contradicts even without its banner.
 Malformed or duplicate Jest suite summaries stay not checkable.
+A malformed `Test Files`, `Test Suites:` or `Type Errors` line makes the statement not checkable for both Vitest and Jest, whichever runner normally prints it.
 Pytest collection-error headings, plain or decorated with underscores, contradict independently of the reported failure count.
 Ordinary stdout beginning with FAIL is not a Cargo runner status.
 Cargo diagnostics apply only to Cargo commands, pytest diagnostics only to pytest, and JavaScript diagnostics only to Vitest or Jest.

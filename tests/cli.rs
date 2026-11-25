@@ -2621,3 +2621,40 @@ fn a_same_second_same_size_edit_is_not_reported_clean() {
     assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
     assert_verdict(&output, 1, "working tree clean", "contradicted");
 }
+
+/// A malformed suite, file or type summary line is runner evidence that cannot be read: it makes the
+/// statement not checkable for either JavaScript runner, rather than being skipped as ordinary output.
+#[test]
+fn malformed_javascript_summary_lines_are_not_checkable_for_either_runner() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    for (command, malformed, summary) in [
+        (
+            "jest",
+            "Type Errors 2 failed extra",
+            "Tests: 1 passed, 1 total",
+        ),
+        ("jest", "Test Files garbage", "Tests: 1 passed, 1 total"),
+        ("vitest", "Test Suites: garbage", "Tests 1 passed (1)"),
+        ("vitest", "Type Errors 2 failed extra", "Tests 1 passed (1)"),
+        (
+            "npx vitest",
+            "Test Files 1 failed and more",
+            "Tests 1 passed (1)",
+        ),
+    ] {
+        fs::write(log.path(), format!("$ {command}\n{malformed}\n{summary}\n")).unwrap();
+        let output = repository.check_with(
+            &format!("Ran `{command}`, 1 passed\n"),
+            &["--log", &format!("{command}={}", log.path().display())],
+            &[],
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(3),
+            "{command} {malformed:?}: {}",
+            stdout(&output)
+        );
+        assert_verdict(&output, 1, "test counts in supplied log", "not checkable");
+    }
+}

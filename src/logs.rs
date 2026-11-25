@@ -617,15 +617,15 @@ fn diagnostic(runner: Runner, line: &str) -> Option<Diagnostic> {
             .collect()
     });
     let line = line.trim();
-    if JAVASCRIPT.contains(&runner) && line.starts_with("Test Files") {
-        // The table's file-failure rule requires a valid category total.
-        vitest_file_line(line)?;
-    }
-    if JAVASCRIPT.contains(&runner) && line.starts_with("Test Suites:") {
-        jest_suite_line(line)?;
-    }
-    if JAVASCRIPT.contains(&runner) && line.starts_with("Type Errors") {
-        vitest_type_summary(line)?;
+    // A suite, file or type summary line that does not parse is runner evidence that cannot be read,
+    // for either JavaScript runner, not ordinary output to skip: the statement is not checkable.
+    if JAVASCRIPT.contains(&runner) {
+        let malformed = (line.starts_with("Test Files") && vitest_file_line(line).is_none())
+            || (line.starts_with("Test Suites:") && jest_suite_line(line).is_none())
+            || (line.starts_with("Type Errors") && vitest_type_summary(line).is_none());
+        if malformed {
+            return Some(Inconsistent);
+        }
     }
     COMPILED
         .iter()
@@ -769,12 +769,14 @@ mod diagnostic_tests {
             ("Type Errors  1 failed", JAVASCRIPT, Some(Failure)),
             ("Type Errors 1 error", JAVASCRIPT, Some(Failure)),
             ("Type Errors  no errors", NONE, None),
-            ("Type Errors 2 failed extra", NONE, None),
-            ("Type Errors 18446744073709551616 failed", NONE, None),
+            // Malformed summary lines are unreadable runner evidence for both JavaScript runners.
+            ("Type Errors 2 failed extra", JAVASCRIPT, Some(Inconsistent)),
+            ("Type Errors 18446744073709551616 failed", JAVASCRIPT, Some(Inconsistent)),
             (" Test Files  2 failed (2)", JAVASCRIPT, Some(Failure)),
-            ("Test Files 2 failed (1)", NONE, None),
-            ("Test Files 1 failed | 1 skipped (1)", NONE, None),
-            ("Test Files 2 failed (", NONE, None),
+            ("Test Files 2 failed (1)", JAVASCRIPT, Some(Inconsistent)),
+            ("Test Files 1 failed | 1 skipped (1)", JAVASCRIPT, Some(Inconsistent)),
+            ("Test Files 2 failed (", JAVASCRIPT, Some(Inconsistent)),
+            ("Test Suites: garbage", JAVASCRIPT, Some(Inconsistent)),
             ("Test Suites: 1 failed, 1 total", JAVASCRIPT, Some(Failure)),
             (" FAIL  math.test.ts > adds", JAVASCRIPT, Some(Failure)),
             ("      Tests  1 failed (1)", NONE, None),
