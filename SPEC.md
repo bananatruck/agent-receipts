@@ -131,6 +131,7 @@ A failed suite covers a test file that failed to load or a hook failure that ski
 Vitest's `Type Errors N failed` line counts type tests that are already failed tests in the Tests line, so it is an ordinary failure and matching counts can confirm.
 A type error outside any test appears as a failed suite or an unhandled source error instead, and contradicts.
 Cargo's `process didn't exit successfully:` cause contradicts independently of counted assertion failures, with or without an `error:` prefix.
+Cargo's `could not execute process ... (never executed)` cause, printed when a test binary cannot be launched, also contradicts independently of counted assertion failures, because that target counted nothing.
 Ordinary assertion failures exit with status 101 and omit that cause, so matching complete counts can confirm.
 Jest suite-loading errors also contradict a statement that accurately reports assertion failure counts.
 Pytest collection-error headings, plain or decorated with underscores, contradict independently of the reported failure count.

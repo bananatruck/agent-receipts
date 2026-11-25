@@ -463,9 +463,10 @@ fn javascript_summary(text: &str) -> Option<Counts> {
 // 1. The command decides the runner. Each runner reads only its own lines.
 // 2. A diagnostic line from the table below is either Abnormal or Failure.
 //    Abnormal: the runner reports an error that its test counts do not
-//    contain (a compile error, an abnormal exit, a suite that failed to load
-//    or set up, a collection, internal or unhandled error). No count can
-//    account for it, so the statement is contradicted.
+//    contain (a compile error, a test binary that could not be launched or
+//    exited abnormally, a suite that failed to load or set up, a collection,
+//    internal or unhandled error). No count can account for it, so the
+//    statement is contradicted.
 //    Failure: an ordinary failed-test marker. Its tests are inside the
 //    counts, so it contradicts only a statement that reports no failures.
 // 3. Otherwise the runner's parser must find one complete summary: one
@@ -523,6 +524,10 @@ const RULES: &[(&[Runner], Diagnostic, &str)] = &[
     // ordinary assertion exits use status 101 and omit that cause.
     (&[Cargo], Abnormal, r"^error: could not compile"),
     (&[Cargo], Abnormal, r"^(?:error: )?process didn't exit successfully:"),
+    // Cargo 1.85 crates/cargo-util/src/process_error.rs: a test binary that
+    // could not be spawned prints `could not execute process CMD (never
+    // executed)` as its cause, and its tests are in no count.
+    (&[Cargo], Abnormal, r"^(?:error: )?could not execute process\b"),
     (&[Cargo], Failure, r"^error: (?:test failed|[0-9]+ targets? failed)"),
     (&[Cargo], Failure, r"^test result: FAILED\."),
     // pytest: internal errors, and collection errors whose tests were never
@@ -575,6 +580,9 @@ mod diagnostic_tests {
             ("error: could not compile `fixture` (lib test) due to 1 previous error", &[Cargo], Some(Abnormal)),
             ("error: process didn't exit successfully: `target/debug/deps/x-1` (signal: 11)", &[Cargo], Some(Abnormal)),
             ("  process didn't exit successfully: `target/debug/deps/x-1` (exit status: 4)", &[Cargo], Some(Abnormal)),
+            ("  could not execute process `target/debug/deps/x-1 --quiet` (never executed)", &[Cargo], Some(Abnormal)),
+            ("error: could not execute process `target/debug/deps/x-1` (never executed)", &[Cargo], Some(Abnormal)),
+            ("Running: could not execute process", NONE, None),
             ("error: test failed, to rerun pass `--lib`", &[Cargo], Some(Failure)),
             ("error: 2 targets failed:", &[Cargo], Some(Failure)),
             ("test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s", &[Cargo], Some(Failure)),

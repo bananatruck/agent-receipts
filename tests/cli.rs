@@ -1705,3 +1705,66 @@ fn real_vitest_runs_separate_counted_failures_from_errors_outside_the_counts() {
         assert_eq!(json["statements"][0]["verdict"], verdict, "{fixture}");
     }
 }
+
+#[test]
+fn real_cargo_runs_contradict_targets_that_never_ran_or_exited_abnormally() {
+    // Captured from Cargo 1.100 with colors off, stdout and stderr merged;
+    // only the fixture project path was replaced. In the launch failures an
+    // earlier test removed a later test binary, so Cargo printed `could not
+    // execute process ... (never executed)` and that target counted nothing.
+    let repository = Repository::new();
+    let fixtures = Path::new("tests/fixtures/cargo-1.100");
+    for (fixture, command, counts, verdict) in [
+        (
+            "launch-failure-quiet",
+            "cargo test -q --no-fail-fast",
+            "0 passed, 1 failed",
+            "contradicted",
+        ),
+        (
+            "launch-failure",
+            "cargo test --no-fail-fast",
+            "0 passed, 1 failed",
+            "contradicted",
+        ),
+        (
+            "signal-quiet",
+            "cargo test -q --no-fail-fast",
+            "0 passed, 1 failed",
+            "contradicted",
+        ),
+        (
+            "assertion-quiet",
+            "cargo test -q --no-fail-fast",
+            "1 passed, 1 failed",
+            "confirmed",
+        ),
+        (
+            "assertion-quiet",
+            "cargo test -q --no-fail-fast",
+            "1 passed",
+            "contradicted",
+        ),
+    ] {
+        let log = fixtures.join(format!("{fixture}.log"));
+        let mapping = format!("{command}={}", log.display());
+        let report = format!("Ran `{command}`, {counts}\n");
+        let expected = if verdict == "confirmed" { 0 } else { 1 };
+        let output = repository.check_with(&report, &["--log", &mapping], &[]);
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "{fixture} {counts}: {}",
+            stdout(&output)
+        );
+        assert_verdict(&output, 1, "test counts in supplied log", verdict);
+
+        let output = repository.check_with(&report, &["--log", &mapping, "--json"], &[]);
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["exit_code"], expected, "{fixture} {counts}");
+        assert_eq!(
+            json["statements"][0]["verdict"], verdict,
+            "{fixture} {counts}"
+        );
+    }
+}

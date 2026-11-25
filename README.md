@@ -79,6 +79,7 @@ Failures contradict test-success statements, even when the passed count matches.
 A statement that explicitly reports a nonzero failure count can confirm when both counts match.
 Runner errors outside those test counts, such as crashes, internal errors, or unhandled errors, contradict the statement.
 Cargo's `process didn't exit successfully:` cause contradicts even matching assertion counts, including quiet runs without suite announcements or an `error:` prefix on the cause.
+So does Cargo's `could not execute process` cause for a test binary that was never launched.
 Pytest collection errors, including underscore-decorated headings, contradict even matching failure counts.
 Vitest failed suites, unhandled errors, and source errors contradict even matching failure counts.
 Vitest type-test failures are already in its Tests count, so matching counts can confirm a statement that reports them.
