@@ -1614,8 +1614,9 @@ fn pushed_hashes_reject_prefix_collisions_across_object_types() {
 
 #[test]
 fn real_vitest_runs_separate_counted_failures_from_errors_outside_the_counts() {
-    // Captured from Vitest 3.2.4 with colors disabled, stdout and stderr merged;
-    // only the project path on the RUN line was replaced. Its Type Errors line
+    // Captured from Vitest 3.2.4 with colors disabled, stdout and stderr merged
+    // unless the name ends in -stdout; only the project path on the RUN line
+    // was replaced. Its Type Errors line
     // counts failed type tests, which the Tests line already includes. Failed
     // suites and unhandled errors are outside the Tests count.
     let repository = Repository::new();
@@ -1684,6 +1685,27 @@ fn real_vitest_runs_separate_counted_failures_from_errors_outside_the_counts() {
             "npx vitest run",
             "1 passed",
             "contradicted",
+        ),
+        // Stdout only: the Failed Suites banner went to stderr, so only the
+        // failed-file total exceeding the failed-test total shows the file
+        // that failed outside its tests.
+        (
+            "failed-suite-stdout",
+            "npx vitest run",
+            "0 passed, 1 failed",
+            "contradicted",
+        ),
+        (
+            "failed-hook-stdout",
+            "npx vitest run",
+            "0 passed, 1 failed",
+            "contradicted",
+        ),
+        (
+            "two-failures-one-file-stdout",
+            "npx vitest run",
+            "0 passed, 2 failed",
+            "confirmed",
         ),
     ] {
         let log = fixtures.join(format!("{fixture}.log"));

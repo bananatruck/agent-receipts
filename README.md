@@ -82,6 +82,7 @@ Cargo's `process didn't exit successfully:` cause contradicts even matching asse
 So does Cargo's `could not execute process` cause for a test binary that was never launched.
 Pytest collection errors, including underscore-decorated headings, contradict even matching failure counts.
 Vitest failed suites, unhandled errors, and source errors contradict even matching failure counts.
+In a stdout-only Vitest capture without those banners, more failed test files than failed tests also contradicts.
 Vitest type-test failures are already in its Tests count, so matching counts can confirm a statement that reports them.
 Diagnostics are recognized only for the corresponding command family.
 The output states that a supplied log is evidence only of its contents, not authentic execution in this checkout.

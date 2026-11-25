@@ -128,6 +128,7 @@ An ordinary failure marker belongs to tests inside the counts, so it contradicts
 Crashes, compilation errors, internal errors, and unhandled errors cannot be accounted for by a test failure count and contradict the statement.
 Vitest's `Errors N error` line and its `Unhandled Errors`, `Source Errors`, and `Failed Suites N` banners are abnormal, including banners inside divider characters.
 A failed suite covers a test file that failed to load or a hook failure that skipped its tests, which the Tests count does not include as failures.
+Vitest writes those banners to stderr, so a stdout-only capture can lack them; a `Test Files` failed total above the `Tests` failed total still shows a file that failed outside its tests, because every failed test fails its own file, and contradicts the statement.
 Vitest's `Type Errors N failed` line counts type tests that are already failed tests in the Tests line, so it is an ordinary failure and matching counts can confirm.
 A type error outside any test appears as a failed suite or an unhandled source error instead, and contradicts.
 Cargo's `process didn't exit successfully:` cause contradicts independently of counted assertion failures, with or without an `error:` prefix.

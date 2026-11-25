@@ -59,7 +59,11 @@ impl Logs {
                 }
                 let body = &text[records[0].0..];
                 let runner = Runner::of(command).ok_or("unsupported command family")?;
-                let diagnostic = body.lines().filter_map(|l| diagnostic(runner, l)).max();
+                let diagnostic = body
+                    .lines()
+                    .filter_map(|l| diagnostic(runner, l))
+                    .max()
+                    .max(runner.unaccounted_failures(body));
                 match diagnostic {
                     Some(Diagnostic::Abnormal) => return Ok(None),
                     Some(Diagnostic::Failure) if failed.unwrap_or(0) == 0 => return Ok(None),
@@ -466,7 +470,8 @@ fn javascript_summary(text: &str) -> Option<Counts> {
 //    contain (a compile error, a test binary that could not be launched or
 //    exited abnormally, a suite that failed to load or set up, a collection,
 //    internal or unhandled error). No count can account for it, so the
-//    statement is contradicted.
+//    statement is contradicted. One Abnormal rule spans two lines and sits
+//    beside the table: a Vitest failed-file total above the failed-test total.
 //    Failure: an ordinary failed-test marker. Its tests are inside the
 //    counts, so it contradicts only a statement that reports no failures.
 // 3. Otherwise the runner's parser must find one complete summary: one
@@ -500,6 +505,14 @@ impl Runner {
             Self::Cargo => cargo_summary(body),
             Self::Pytest => pytest_summary(body),
             Self::Vitest | Self::Jest => javascript_summary(body),
+        }
+    }
+
+    // The one Abnormal rule that needs two lines; see vitest_files_outside_tests.
+    fn unaccounted_failures(self, body: &str) -> Option<Diagnostic> {
+        match self {
+            Self::Vitest => vitest_files_outside_tests(body).then_some(Abnormal),
+            Self::Cargo | Self::Pytest | Self::Jest => None,
         }
     }
 }
@@ -547,6 +560,10 @@ const RULES: &[(&[Runner], Diagnostic, &str)] = &[
     // it is an ordinary failure. Type errors outside a test are reported as
     // a failed suite or an unhandled source error instead.
     (JAVASCRIPT, Failure, r"^Type Errors\s+[1-9][0-9]* (?:failed|errors?)\b"),
+    // A failed Test Files total is ordinary on its own. Above the Tests line's
+    // failed total it is Abnormal; that compares two lines, so it is
+    // Runner::unaccounted_failures, with its source in
+    // vitest_files_outside_tests.
     (JAVASCRIPT, Failure, r"^(?:Test Suites:|Test Files)\s+.*\b[1-9][0-9]* failed\b"),
     (JAVASCRIPT, Failure, r"^FAIL "),
 ];
@@ -564,6 +581,26 @@ fn diagnostic(runner: Runner, line: &str) -> Option<Diagnostic> {
         .filter(|(runners, _, pattern)| runners.contains(&runner) && pattern.is_match(line))
         .map(|&(_, kind, _)| kind)
         .max()
+}
+
+// Vitest 3.2.4 reporters/base.ts reportTestSummary prints `Test Files` and
+// `Tests` with one state count over the files and the tests inside them, and
+// @vitest/runner runSuite fails a file when a test in it failed or when the
+// file itself errored (load, hook, no tests). Every failed test fails its own
+// file, so more failed files than failed tests means a file failed outside
+// its tests: the state behind a Failed Suites banner, which printErrorsSummary
+// writes to stderr, so a stdout-only capture lacks it. Equal or fewer failed
+// files prove nothing either way, so this catches some abnormal runs, not all.
+fn vitest_files_outside_tests(body: &str) -> bool {
+    static FILES: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^Test Files\s+(.+) \([0-9]+\)$").unwrap());
+    let Some(tests) = javascript_summary(body) else {
+        return false;
+    };
+    body.lines()
+        .filter_map(|line| FILES.captures(line.trim()))
+        .filter_map(|c| count_items(&c[1], &["passed", "failed", "skipped", "todo"], " | "))
+        .any(|files| files.failed > tests.failed)
 }
 
 #[cfg(test)]
@@ -621,6 +658,41 @@ mod diagnostic_tests {
                 };
                 assert_eq!(diagnostic(runner, line), want, "{runner:?} {line:?}");
             }
+        }
+    }
+
+    #[test]
+    fn vitest_failed_files_beyond_failed_tests_are_abnormal() {
+        for (log, expected) in [
+            (
+                " Test Files  2 failed (2)\n      Tests  1 failed (1)\n",
+                Some(Abnormal),
+            ),
+            (
+                " Test Files  1 failed (1)\n      Tests  1 skipped (1)\n",
+                Some(Abnormal),
+            ),
+            (
+                " Test Files  1 failed (1)\n      Tests  1 passed (1)\n",
+                Some(Abnormal),
+            ),
+            (
+                " Test Files  1 failed (1)\n      Tests  1 failed (1)\n",
+                None,
+            ),
+            (
+                " Test Files  1 failed (1)\n      Tests  2 failed (2)\n",
+                None,
+            ),
+            (
+                " Test Files  1 failed | 1 passed (2)\n      Tests  1 failed | 3 passed (4)\n",
+                None,
+            ),
+            // Without one complete Tests line the summary is not checkable.
+            (" Test Files  2 failed (2)\n", None),
+        ] {
+            assert_eq!(Vitest.unaccounted_failures(log), expected, "{log:?}");
+            assert_eq!(Jest.unaccounted_failures(log), None, "{log:?}");
         }
     }
 }
