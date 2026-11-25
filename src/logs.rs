@@ -216,7 +216,7 @@ pub fn cargo_summary(text: &str) -> Option<Counts> {
             .checked_add(ignored)?
             .checked_add(measured)?
             != expected
-            || (c[1].eq("ok") && failed != 0)
+            || (c[1].eq("ok") != (failed == 0))
         {
             return None;
         }

@@ -1932,3 +1932,45 @@ fn clean_checks_reinspect_flags_set_during_status() {
         assert_verdict(&output, 1, "working tree clean", "not checkable");
     }
 }
+
+#[test]
+fn cargo_summary_status_must_agree_with_each_suites_failures() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mapping = format!("cargo test={}", log.path().display());
+    for (first, second, verdict) in [
+        (
+            "FAILED. 1 passed; 0 failed",
+            "FAILED. 0 passed; 1 failed",
+            "not checkable",
+        ),
+        (
+            "ok. 1 passed; 0 failed",
+            "FAILED. 0 passed; 1 failed",
+            "confirmed",
+        ),
+        (
+            "ok. 0 passed; 1 failed",
+            "ok. 1 passed; 0 failed",
+            "not checkable",
+        ),
+    ] {
+        fs::write(log.path(), format!("$ cargo test\nrunning 1 test\ntest result: {first}; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\nrunning 1 test\ntest result: {second}; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n")).unwrap();
+        for args in [
+            vec!["--log", mapping.as_str()],
+            vec!["--log", mapping.as_str(), "--json"],
+        ] {
+            let output =
+                repository.check_with("Ran `cargo test`, 1 passed, 1 failed\n", &args, &[]);
+            let expected = if verdict == "confirmed" { 0 } else { 3 };
+            assert_eq!(output.status.code(), Some(expected), "{first}: {output:?}");
+            if args.contains(&"--json") {
+                let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(json["statements"][0]["verdict"], verdict);
+                assert_eq!(json["exit_code"], expected);
+            } else {
+                assert_verdict(&output, 1, "test counts in supplied log", verdict);
+            }
+        }
+    }
+}
