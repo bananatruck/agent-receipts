@@ -91,12 +91,11 @@ impl Repository {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        process
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(report.as_bytes())
-            .unwrap();
+        if let Err(error) = process.stdin.take().unwrap().write_all(report.as_bytes()) {
+            // Argument errors can close stdin before the report is written.
+            // Keep the exit status and stderr available to the calling test.
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "{error}");
+        }
         process.wait_with_output().unwrap()
     }
 }
@@ -2562,4 +2561,16 @@ fn fixture_git_commands_ignore_inherited_config_files() {
         "fixture commands changed the inherited configuration"
     );
     assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+fn argument_errors_remain_observable_when_stdin_closes_early() {
+    let repository = Repository::new();
+    let output = repository.check_with(
+        &"Tree is clean\n".repeat(100_000),
+        &["--unrecognized-option"],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument"));
 }
