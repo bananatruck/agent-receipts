@@ -1974,3 +1974,101 @@ fn cargo_summary_status_must_agree_with_each_suites_failures() {
         }
     }
 }
+
+#[test]
+fn malformed_vitest_file_totals_cannot_determine_a_verdict() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mapping = format!("vitest={}", log.path().display());
+    for (files, tests, counts, extra, verdict) in [
+        (
+            "2 failed (1)",
+            "1 failed (1)",
+            "0 passed, 1 failed",
+            "",
+            "not checkable",
+        ),
+        (
+            "2 failed (1)",
+            "1 passed (1)",
+            "1 passed",
+            "",
+            "not checkable",
+        ),
+        (
+            "1 failed | 1 passed (1)",
+            "1 failed (1)",
+            "0 passed, 1 failed",
+            "",
+            "not checkable",
+        ),
+        (
+            "2 failed (",
+            "1 failed (1)",
+            "0 passed, 1 failed",
+            "",
+            "not checkable",
+        ),
+        (
+            "18446744073709551616 failed (1)",
+            "1 failed (1)",
+            "0 passed, 1 failed",
+            "",
+            "not checkable",
+        ),
+        (
+            "1 failed | 18446744073709551615 passed (1)",
+            "1 failed (1)",
+            "0 passed, 1 failed",
+            "",
+            "not checkable",
+        ),
+        (
+            "2 failed (1)",
+            "1 failed (1)",
+            "0 passed, 1 failed",
+            "Errors 1 error\n",
+            "contradicted",
+        ),
+        (
+            "2 failed (2)",
+            "1 failed (1)",
+            "0 passed, 1 failed",
+            "",
+            "contradicted",
+        ),
+        (
+            "1 failed (1)",
+            "1 failed (1)",
+            "0 passed, 1 failed",
+            "",
+            "confirmed",
+        ),
+    ] {
+        fs::write(
+            log.path(),
+            format!("$ vitest\nTest Files {files}\nTests {tests}\n{extra}"),
+        )
+        .unwrap();
+        for json in [false, true] {
+            let mut args = vec!["--log", mapping.as_str()];
+            if json {
+                args.push("--json");
+            }
+            let output = repository.check_with(&format!("Ran `vitest`, {counts}\n"), &args, &[]);
+            let expected = match verdict {
+                "confirmed" => 0,
+                "contradicted" => 1,
+                _ => 3,
+            };
+            assert_eq!(output.status.code(), Some(expected), "{files}: {output:?}");
+            if json {
+                let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(doc["statements"][0]["verdict"], verdict);
+                assert_eq!(doc["exit_code"], expected);
+            } else {
+                assert_verdict(&output, 1, "test counts in supplied log", verdict);
+            }
+        }
+    }
+}

@@ -455,7 +455,13 @@ fn javascript_summary(text: &str) -> Option<Counts> {
         let c = VITEST.captures(line)?;
         (c[1].to_owned(), c[2].parse::<u64>().ok()?, " | ")
     };
-    let counts = count_items(&items, &["passed", "failed", "skipped", "todo"], separator)?;
+    totaled_items(&items, total, separator)
+}
+
+// All categories, including skipped and todo, must add up before counts
+// can be used as either a summary or a diagnostic.
+fn totaled_items(items: &str, total: u64, separator: &str) -> Option<Counts> {
+    let counts = count_items(items, &["passed", "failed", "skipped", "todo"], separator)?;
     let sum = items.split(separator).try_fold(0u64, |sum, item| {
         sum.checked_add(item.trim().split_once(' ')?.0.parse().ok()?)
     })?;
@@ -504,7 +510,11 @@ impl Runner {
         match self {
             Self::Cargo => cargo_summary(body),
             Self::Pytest => pytest_summary(body),
-            Self::Vitest | Self::Jest => javascript_summary(body),
+            Self::Vitest => {
+                vitest_file_summary(body)?;
+                javascript_summary(body)
+            }
+            Self::Jest => javascript_summary(body),
         }
     }
 
@@ -576,6 +586,10 @@ fn diagnostic(runner: Runner, line: &str) -> Option<Diagnostic> {
             .collect()
     });
     let line = line.trim();
+    if JAVASCRIPT.contains(&runner) && line.starts_with("Test Files") {
+        // The table's file-failure rule requires a valid category total.
+        vitest_file_line(line)?;
+    }
     COMPILED
         .iter()
         .filter(|(runners, _, pattern)| runners.contains(&runner) && pattern.is_match(line))
@@ -592,15 +606,34 @@ fn diagnostic(runner: Runner, line: &str) -> Option<Diagnostic> {
 // writes to stderr, so a stdout-only capture lacks it. Equal or fewer failed
 // files prove nothing either way, so this catches some abnormal runs, not all.
 fn vitest_files_outside_tests(body: &str) -> bool {
-    static FILES: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"^Test Files\s+(.+) \([0-9]+\)$").unwrap());
-    let Some(tests) = javascript_summary(body) else {
+    let (Some(tests), Some(Some(files))) = (javascript_summary(body), vitest_file_summary(body))
+    else {
         return false;
     };
-    body.lines()
-        .filter_map(|line| FILES.captures(line.trim()))
-        .filter_map(|c| count_items(&c[1], &["passed", "failed", "skipped", "todo"], " | "))
-        .any(|files| files.failed > tests.failed)
+    files.failed > tests.failed
+}
+
+// Vitest 3.2.4 reporters/base.ts reportTestSummary: file categories use
+// the same parenthesized total as test categories. Absence is allowed,
+// but a present malformed or duplicate file summary is ambiguous evidence.
+fn vitest_file_summary(body: &str) -> Option<Option<Counts>> {
+    let lines: Vec<_> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("Test Files"))
+        .collect();
+    match lines.as_slice() {
+        [] => Some(None),
+        [line] => vitest_file_line(line).map(Some),
+        _ => None,
+    }
+}
+
+fn vitest_file_line(line: &str) -> Option<Counts> {
+    static FILES: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^Test Files\s+(.+) \(([0-9]+)\)$").unwrap());
+    let c = FILES.captures(line)?;
+    totaled_items(&c[1], c[2].parse().ok()?, " | ")
 }
 
 #[cfg(test)]
@@ -641,6 +674,9 @@ mod diagnostic_tests {
             ("Type Errors 1 error", JAVASCRIPT, Some(Failure)),
             ("Type Errors  no errors", NONE, None),
             (" Test Files  2 failed (2)", JAVASCRIPT, Some(Failure)),
+            ("Test Files 2 failed (1)", NONE, None),
+            ("Test Files 1 failed | 1 skipped (1)", NONE, None),
+            ("Test Files 2 failed (", NONE, None),
             ("Test Suites: 1 failed, 1 total", JAVASCRIPT, Some(Failure)),
             (" FAIL  math.test.ts > adds", JAVASCRIPT, Some(Failure)),
             ("      Tests  1 failed (1)", NONE, None),
