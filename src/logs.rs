@@ -624,6 +624,9 @@ fn diagnostic(runner: Runner, line: &str) -> Option<Diagnostic> {
     if JAVASCRIPT.contains(&runner) && line.starts_with("Test Suites:") {
         jest_suite_line(line)?;
     }
+    if JAVASCRIPT.contains(&runner) && line.starts_with("Type Errors") {
+        vitest_type_summary(line)?;
+    }
     COMPILED
         .iter()
         .filter(|(runners, _, pattern)| runners.contains(&runner) && pattern.is_match(line))
@@ -766,6 +769,8 @@ mod diagnostic_tests {
             ("Type Errors  1 failed", JAVASCRIPT, Some(Failure)),
             ("Type Errors 1 error", JAVASCRIPT, Some(Failure)),
             ("Type Errors  no errors", NONE, None),
+            ("Type Errors 2 failed extra", NONE, None),
+            ("Type Errors 18446744073709551616 failed", NONE, None),
             (" Test Files  2 failed (2)", JAVASCRIPT, Some(Failure)),
             ("Test Files 2 failed (1)", NONE, None),
             ("Test Files 1 failed | 1 skipped (1)", NONE, None),

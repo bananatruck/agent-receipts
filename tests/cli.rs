@@ -2574,3 +2574,24 @@ fn argument_errors_remain_observable_when_stdin_closes_early() {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument"));
 }
+
+#[test]
+fn malformed_type_counts_cannot_determine_zero_failure_claims() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    for types in [
+        "2 failed extra",
+        "18446744073709551616 failed",
+        "2 failed (",
+    ] {
+        fs::write(
+            log.path(),
+            format!("$ vitest\nTests 1 passed (1)\nType Errors {types}\n"),
+        )
+        .unwrap();
+        let mapping = format!("vitest={}", log.path().display());
+        let output = repository.check_with("Ran `vitest`, 1 passed\n", &["--log", &mapping], &[]);
+        assert_eq!(output.status.code(), Some(3), "{types}: {output:?}");
+        assert_verdict(&output, 1, "test counts in supplied log", "not checkable");
+    }
+}
