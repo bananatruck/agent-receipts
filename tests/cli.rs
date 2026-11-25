@@ -2595,3 +2595,29 @@ fn malformed_type_counts_cannot_determine_zero_failure_claims() {
         assert_verdict(&output, 1, "test counts in supplied log", "not checkable");
     }
 }
+
+/// Git trusts an index entry's stat data unless the entry is "racily clean": modified no earlier than
+/// the index file was written, when it compares contents instead. A same-size edit in the same second
+/// as the last index write is caught only that way, so the private index used for status must keep the
+/// live index's modification time; a fresh copy would be newer than its entries and report the edit
+/// as clean. Commit and edit right after a second boundary, then check in the next second.
+#[test]
+fn a_same_second_same_size_edit_is_not_reported_clean() {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    let wait_for_next_second = || {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        std::thread::sleep(
+            Duration::from_nanos(1_000_000_000 - u64::from(now.subsec_nanos()))
+                + Duration::from_millis(20),
+        );
+    };
+    let repository = Repository::new();
+    wait_for_next_second();
+    repository.write("tracked.txt", "before\n");
+    repository.commit();
+    repository.write("tracked.txt", "after!\n");
+    wait_for_next_second();
+    let output = repository.check("Tree is clean\n");
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert_verdict(&output, 1, "working tree clean", "contradicted");
+}

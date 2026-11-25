@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use crate::report::{Claim, DiffClaim, PathAction};
@@ -464,7 +464,7 @@ impl Repository {
         if let Some(path) = shared.strip_suffix('\n').filter(|s| !s.is_empty()) {
             let source = self.path.join(path);
             let name = source.file_name().ok_or("invalid shared index path")?;
-            fs::copy(&source, directory.join(name)).map_err(snapshot_error)?;
+            copy_with_mtime(&source, &directory.join(name)).map_err(snapshot_error)?;
         }
 
         // git-config(1) --null --list resolves includes in the original repo.
@@ -549,9 +549,22 @@ fn snapshot_error(error: std::io::Error) -> String {
     format!("cannot snapshot Git evidence: {error}")
 }
 
+/// Copies a file into the status snapshot with its modification time. Git compares the contents of an
+/// index entry that is not older than the index file ("racily clean") and trusts its stat data
+/// otherwise; a copy stamped with the current time would be newer than its entries, so a same-size edit
+/// in the same timestamp tick as the last index write would look clean.
+fn copy_with_mtime(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::copy(source, destination)?;
+    let modified = fs::metadata(source)?.modified()?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(destination)?
+        .set_modified(modified)
+}
+
 fn copy_optional(source: PathBuf, destination: PathBuf) -> Result<(), String> {
-    match fs::copy(source, destination) {
-        Ok(_) => Ok(()),
+    match copy_with_mtime(&source, &destination) {
+        Ok(()) => Ok(()),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
         Err(error) => Err(snapshot_error(error)),
     }
