@@ -2376,3 +2376,102 @@ fn separate_log_arguments_allow_equals_in_commands_and_paths() {
     let output = repository.check_with(report, &["--log-file", "pytest"], &[]);
     assert_eq!(output.status.code(), Some(2), "{output:?}");
 }
+
+#[test]
+fn jest_suite_failures_must_be_accounted_for_by_failed_tests() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    for command in ["jest", "npx jest"] {
+        for (suites, verdict, exit) in [
+            ("2 failed, 2 total", "contradicted", 1),
+            ("1 failed, 1 total", "confirmed", 0),
+            ("1 failed, 2 total", "not checkable", 3),
+            ("2 failed, 1 total", "not checkable", 3),
+            ("2 failed,", "not checkable", 3),
+            (
+                "18446744073709551616 failed, 18446744073709551616 total",
+                "not checkable",
+                3,
+            ),
+            (
+                "1 failed, 1 total\nTest Suites: 2 failed, 2 total",
+                "not checkable",
+                3,
+            ),
+        ] {
+            fs::write(
+                log.path(),
+                format!("$ {command}\nTest Suites: {suites}\nTests: 1 failed, 1 total\n"),
+            )
+            .unwrap();
+            let mapping = format!("{command}={}", log.path().display());
+            for json in [false, true] {
+                let mut args = vec!["--log", &mapping];
+                if json {
+                    args.push("--json");
+                }
+                let output = repository.check_with(
+                    &format!("Ran `{command}`, 0 passed, 1 failed\n"),
+                    &args,
+                    &[],
+                );
+                assert_eq!(
+                    output.status.code(),
+                    Some(exit),
+                    "{command} {suites}: {output:?}"
+                );
+                if json {
+                    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                    assert_eq!(doc["statements"][0]["verdict"], verdict);
+                } else {
+                    assert_verdict(&output, 1, "test counts in supplied log", verdict);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn vitest_type_failures_cannot_exceed_failed_test_counts() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    for command in ["vitest", "npx vitest"] {
+        for (types, verdict, exit) in [
+            ("2 failed", "not checkable", 3),
+            ("1 failed", "confirmed", 0),
+            ("no errors", "confirmed", 0),
+            ("18446744073709551616 failed", "not checkable", 3),
+            ("2 failed extra", "not checkable", 3),
+            ("1 failed\nType Errors 2 failed", "not checkable", 3),
+        ] {
+            fs::write(
+                log.path(),
+                format!("$ {command}\nTests 1 failed (1)\nType Errors {types}\n"),
+            )
+            .unwrap();
+            let mapping = format!("{command}={}", log.path().display());
+            for json in [false, true] {
+                let mut args = vec!["--log", &mapping];
+                if json {
+                    args.push("--json");
+                }
+                let output = repository.check_with(
+                    &format!("Ran `{command}`, 0 passed, 1 failed\n"),
+                    &args,
+                    &[],
+                );
+                assert_eq!(
+                    output.status.code(),
+                    Some(exit),
+                    "{command} {types}: {output:?}"
+                );
+                if json {
+                    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                    assert_eq!(doc["statements"][0]["verdict"], verdict);
+                } else {
+                    assert_verdict(&output, 1, "test counts in supplied log", verdict);
+                }
+            }
+        }
+    }
+}

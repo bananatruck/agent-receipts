@@ -128,7 +128,9 @@ Matching passed counts and the explicitly reported failure count confirm the sta
 An omitted failure count means zero failures.
 When a statement reports failures, ordinary test-failure markers alone cannot resolve missing or ambiguous counts, which stay not checkable.
 Differing counts contradict the statement.
-Each runner diagnostic is either abnormal or an ordinary failure, from one rule table in src/logs.rs that cites the runner source for each line shape.
+One rule table in src/logs.rs holds line diagnostics and comparisons of complete counts, with a runner source for each rule.
+Diagnostics distinguish abnormal errors, inconsistent evidence, and ordinary failures.
+Inconsistent evidence makes the statement not checkable.
 An abnormal diagnostic reports an error that the runner's test counts do not contain, so it contradicts the statement whatever counts it reports.
 An ordinary failure marker belongs to tests inside the counts, so it contradicts only a statement that reports no failures.
 Crashes, compilation errors, internal errors, and unhandled errors cannot be accounted for by a test failure count and contradict the statement.
@@ -136,11 +138,15 @@ Vitest's `Errors N error` line and its `Unhandled Errors`, `Source Errors`, and 
 A failed suite covers a test file that failed to load or a hook failure that skipped its tests, which the Tests count does not include as failures.
 Vitest writes those banners to stderr, so a stdout-only capture can lack them; a `Test Files` failed total above the `Tests` failed total still shows a file that failed outside its tests, because every failed test fails its own file, and contradicts the statement.
 Vitest's `Type Errors N failed` line counts type tests that are already failed tests in the Tests line, so it is an ordinary failure and matching counts can confirm.
+A type-failure count above the failed-test count is inconsistent and not checkable.
+Malformed or duplicate type summaries also stay not checkable.
 A type error outside any test appears as a failed suite or an unhandled source error instead, and contradicts.
 Cargo's `process didn't exit successfully:` cause contradicts independently of counted assertion failures, with or without an `error:` prefix.
 Cargo's `could not execute process ... (never executed)` cause, printed when a test binary cannot be launched, also contradicts independently of counted assertion failures, because that target counted nothing.
 Ordinary assertion failures exit with status 101 and omit that cause, so matching complete counts can confirm.
 Jest suite-loading errors also contradict a statement that accurately reports assertion failure counts.
+A validated Jest failed-suite count above the failed-test count proves a suite execution error and contradicts even without its banner.
+Malformed or duplicate Jest suite summaries stay not checkable.
 Pytest collection-error headings, plain or decorated with underscores, contradict independently of the reported failure count.
 Ordinary stdout beginning with FAIL is not a Cargo runner status.
 Cargo diagnostics apply only to Cargo commands, pytest diagnostics only to pytest, and JavaScript diagnostics only to Vitest or Jest.

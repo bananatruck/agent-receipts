@@ -86,6 +86,9 @@ Pytest collection errors, including underscore-decorated headings, contradict ev
 Vitest failed suites, unhandled errors, and source errors contradict even matching failure counts.
 In a stdout-only Vitest capture without those banners, more failed test files than failed tests also contradicts.
 Vitest type-test failures are already in its Tests count, so matching counts can confirm a statement that reports them.
+More type failures than failed tests are inconsistent evidence and stay not checkable.
+For Jest, more failed suites than failed tests shows a suite execution error and contradicts the statement.
+Malformed or duplicate suite and type summaries stay not checkable.
 Diagnostics are recognized only for the corresponding command family.
 The output states that a supplied log is evidence only of its contents, not authentic execution in this checkout.
 
