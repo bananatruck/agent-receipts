@@ -1,0 +1,10 @@
+LINE	STATEMENT	CHECK	VERDICT	EVIDENCE
+1	# Synthetic report about this repository's history	unsupported	not checkable	no supported assertion grammar; no evidence check performed
+3	Commit 2ae7b07 exists	commit exists locally	confirmed	local object 2ae7b072e373f97b6bbe3dc2adae186d5b23255c has type commit
+4	File src/missing.rs exists	file at HEAD	contradicted	no file entry at HEAD:src/missing.rs
+5	Added src/logs.rs	committed path action	confirmed	committed diff 670dafc0136bcf3dd3f1e0443bd34619ed88945e..2ae7b072e373f97b6bbe3dc2adae186d5b23255c: M Cargo.lock; M Cargo.toml; M README.md; M SPEC.md; M examples/demo.sh; A examples/history-output.tsv; A examples/synthetic-history-report.md; M src/git.rs; A src/logs.rs; M src/main.rs; M src/report.rs; A submission/DEVPOST.md; A submission/demo-script.md; M tests/cli.rs; excludes working-tree changes and intermediate edits
+6	Did not modify LICENSE	committed diff scope	confirmed	committed diff 670dafc0136bcf3dd3f1e0443bd34619ed88945e..2ae7b072e373f97b6bbe3dc2adae186d5b23255c: M Cargo.lock; M Cargo.toml; M README.md; M SPEC.md; M examples/demo.sh; A examples/history-output.tsv; A examples/synthetic-history-report.md; M src/git.rs; A src/logs.rs; M src/main.rs; M src/report.rs; A submission/DEVPOST.md; A submission/demo-script.md; M tests/cli.rs; excludes working-tree changes and intermediate edits
+7	Ran `cargo test --locked --all-targets`, 57 passed	test counts in supplied log	confirmed	cargo test --locked --all-targets: 57 passed, 0 failed; evidence covers only what the supplied log contains, not execution or authenticity
+8	Ran `cargo test --locked --all-targets`, 58 passed	test counts in supplied log	contradicted	cargo test --locked --all-targets: 57 passed, 0 failed; evidence covers only what the supplied log contains, not execution or authenticity
+9	Not pushed	local tracking ref ancestry	not checkable	supply --remote-ref refs/remotes/NAME/BRANCH; no network is used
+Summary: 4 confirmed, 2 contradicted, 2 not checkable

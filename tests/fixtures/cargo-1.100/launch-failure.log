@@ -1,0 +1,46 @@
+$ cargo test --no-fail-fast
+   Compiling launch-fixture v0.1.0 (/work/fixture)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (target/debug/build/launch-fixture/2ec0477da2f29ffb/out/launch_fixture-2ec0477da2f29ffb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/a_assertion.rs (target/debug/build/launch-fixture/ac0b77d442bea9c8/out/a_assertion-ac0b77d442bea9c8)
+
+running 1 test
+test assertion ... FAILED
+
+failures:
+
+---- assertion stdout ----
+
+thread 'assertion' (666700) panicked at tests/a_assertion.rs:17:5:
+fixture assertion
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    assertion
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test a_assertion`
+     Running tests/z_missing.rs (target/debug/build/launch-fixture/5dd0a0ee83f172a8/out/z_missing-5dd0a0ee83f172a8)
+error: test failed, to rerun pass `--test z_missing`
+
+Caused by:
+  could not execute process `/work/fixture/target/debug/build/launch-fixture/5dd0a0ee83f172a8/out/z_missing-5dd0a0ee83f172a8` (never executed)
+
+Caused by:
+  No such file or directory (os error 2)
+   Doc-tests launch_fixture
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: 2 targets failed:
+    `--test a_assertion`
+    `--test z_missing`

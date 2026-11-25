@@ -2,73 +2,170 @@
 
 ## Purpose
 
-`agent-receipts` checks explicit statements in a coding report against local Git evidence and shows a verdict with its evidence.
+`agent-receipts` checks explicit statements in a coding report against local repository evidence and supplied command logs.
 The user is a developer or reviewer who needs to check a final report before accepting work.
-A plausible report can name missing files, nonexistent commits, or a clean tree that still has changes.
-The tool checks observable facts and preserves uncertainty when evidence is missing.
-
-## First statement types
-
-| Statement | Evidence | This phase |
-| --- | --- | --- |
-| `Committed as <hash>` or `Commit <hash> exists` | A unique local object whose type is `commit` | Implemented |
-| `File <path> exists` or `Added <path>` | A blob at `HEAD:<path>` | Implemented |
-| `Tree is clean` or `The tree is clean` | Git porcelain status, including untracked files | Implemented |
-| `N tests passed` | An explicitly supplied command log with a matching command and summary | Specified only |
-| `Not pushed` | The current commit and evidence for a named remote ref | Specified only |
-
-Commit hashes contain 7 to 64 hexadecimal characters and may be abbreviated if they identify exactly one local object.
-A missing local object contradicts local existence, even if another repository might have the object.
-Ambiguous abbreviations are not checkable.
-A file verdict concerns presence at HEAD, even when the report uses `Added`.
-It does not establish that the file was newly added, changed since a base, or written by a particular person.
-The table names this reduced check as `file at HEAD` rather than confirming authorship or an addition.
-A directory or submodule is not a file blob.
-A symbolic link counts as its stored blob without following the link.
-File paths are relative to the repository root and cannot contain parent components, absolute roots, or Git revision syntax.
-Missing HEAD makes file statements not checkable.
-Clean means no staged, unstaged, or untracked changes in the working tree, including submodule changes reported by Git.
-Ignored files do not make the tree dirty.
-A clean-tree verdict describes the observation time and cannot prove what the tree looked like earlier.
+Every statement gets a verdict and the evidence behind it.
+Missing evidence stays not checkable.
 
 ## Report grammar
 
-Reports are UTF-8 plain text or Markdown from stdin or a file.
-Each nonempty line contains one statement.
-The parser accepts an optional Markdown bullet or numbered-list prefix and an optional final period.
-Statement keywords are case insensitive.
-Hashes and paths may have a single pair of Markdown backticks.
+Reports are UTF-8 plain text or Markdown from stdin or a file, with one statement per line.
+Keywords are case insensitive, but command records and paths match exactly.
+An optional Markdown bullet or numbered-list prefix and an optional final period are accepted.
+Hashes and individual paths may have one pair of backticks.
 Paths with spaces require backticks.
-Blank lines and Markdown ATX headings are presentation and produce no verdict.
-Fenced code and lines indented by four spaces or a tab are quoted material and cannot confirm a statement.
+Paths are literal repository-root-relative entries, without absolute roots, empty components, parent components, backslashes, control characters, or Git revision syntax.
+Directory prefixes and globs do not stand for sets of paths.
+Blank lines produce no verdict.
+Markdown ATX headings remain unsupported rows and receive not checkable.
+Fenced code, including list-item fences, and lines indented to column four or beyond using spaces or tabs are quoted material and cannot confirm statements.
+List-marker padding of five or more columns is also quoted code.
+Padding tabs advance to four-column stops from the marker's original column, including leading indentation.
+A fence marker indented to column four or beyond cannot close an active fence.
+Closing fences accept only ASCII spaces and tabs around the delimiter.
+Backtick fence info strings cannot contain backticks.
+Tilde fence info strings accept single tildes; inline spans with repeated tildes remain unsupported statement rows.
+Inline multi-backtick or tilde spans remain unsupported rows.
 Fence delimiter lines produce no verdict.
-Every other nonempty line produces a verdict, including unsupported wording, negations, conditional statements, and quoted examples.
-Unsupported lines are not checkable and retain their source line number.
-The parser does not infer claims from arbitrary hash-shaped words or backticked commands.
-Statements embedded in a longer sentence are not checkable.
+Other unsupported lines retain their source line number and receive not checkable.
+Negations, conditionals, or statements embedded in longer prose are unsupported unless listed below.
 No report text is executed.
 
-## Command line
+| Statement | Check |
+| --- | --- |
+| `Committed as <hash>` or `Commit <hash> exists` | A unique local object has type commit |
+| `File <path> exists` | A blob exists at `HEAD:<path>` |
+| `Tree is clean` or `The tree is clean` | Git porcelain status has no changes |
+| ``Ran `<command>`, N passed`` | Matching command record and completed summary in a supplied log |
+| ``Ran `<command>`, N passed, M failed`` | The same count check, including the stated failure count |
+| `Pushed` | HEAD is reachable from the local tracking ref |
+| `Not pushed` or `Did not push` | HEAD is absent from that ancestry |
+| `Pushed <hash>`, `Not pushed <hash>`, or `Did not push <hash>` | One unique local commit object is checked instead |
+| `Only touched <path>, <path>` | Every changed path in the committed diff is in the allowlist |
+| `Did not modify <path>` | A file exists at an endpoint and the diff contains no change at that exact path |
+| `Added <path>` or `Created <path>` | The diff adds a file at that path, including a rename destination |
+| `Deleted <path>` | The diff removes a file at that path, including a rename source |
+| `Renamed <path>` | The committed diff reports status R with that destination |
+| `Renamed <old> to <new>` | The committed diff reports status R with both endpoints |
+
+The allowlist can contain one path or several paths separated by comma and space outside backticks.
+An empty diff satisfies an allowlist or an exclusion of an existing file, but cannot confirm an addition, deletion, or rename.
+Exclusions of directories, paths absent at both endpoints, and submodule contents are not checkable.
+File actions on submodule entries are not checkable.
+A bare test count such as `77 tests passed` lacks a command and stays not checkable.
+
+## Repository evidence
+
+Commit hashes contain 7 to 64 hexadecimal characters and may be abbreviated if they identify exactly one local object.
+Missing objects contradict local existence, while ambiguous abbreviations stay not checkable.
+A directory or submodule is not a file blob.
+A symbolic link counts as its stored blob without following the link.
+File existence concerns HEAD, not an uncommitted working copy.
+Missing HEAD makes file, diff, and default-HEAD ancestry evidence unavailable.
+Clean-tree checks include staged, unstaged, and untracked changes, and exclude ignored files.
+Configured clean or process filters, assume-unchanged or skip-worktree index flags, and submodule worktrees make cleanliness not checkable.
+Index preflight checks inspect the whole repository even when --repo selects a subdirectory.
+They describe the observation time rather than a past state.
+
+`--base COMMIT` resolves a local commit and compares its tree with HEAD's tree.
+This is the net committed diff, excluding staged, unstaged, untracked, and intermediate changes that were later undone.
+The base need not be an ancestor of HEAD.
+Checks show both resolved endpoint hashes and Git's name-status records.
+Rename detection uses Git's 50 percent similarity threshold.
+Both endpoints of renames count as touched paths for allowlists and exclusions.
+A heavily edited rename that Git classifies as an addition and a deletion cannot confirm a rename statement.
+Paths remain root relative even if `--repo` selects a subdirectory or Git configuration requests relative diffs.
+Unavailable objects, invalid base revisions, or unreadable diff records produce not checkable.
+
+`--remote-ref refs/remotes/NAME/BRANCH` names an existing local tracking ref.
+No fetch, push, or network request occurs.
+A bare pushed-state statement checks HEAD independently of other report statements.
+An explicit hash checks only that commit and must identify exactly one local object whose type is commit.
+Ambiguous abbreviations and annotated tag objects stay not checkable.
+The evidence includes resolved commits and the tracking ref's current local hash.
+This confirms only reachability in the local snapshot, not the server's present state, whether a push command ran, or whether a commit was ever pushed elsewhere.
+Missing refs, invalid names, and unresolved commits stay not checkable.
+Shallow history cannot confirm absence from ancestry.
+
+## Supplied command logs
+
+Repeat `--log 'COMMAND=PATH'` for distinct commands.
+The final equals sign is the separator, allowing equals signs in command arguments.
+Log paths containing equals signs are unsupported.
+Paths resolve from the invocation directory, independently of `--repo`.
+Each log is UTF-8 text and must contain exactly one command record, written as `$ COMMAND` on its own line before the output.
+The record, flag, and report command must match exactly, including flags and spaces.
+CRLF line endings are normalized.
+Duplicate flags for the same command, unreadable logs, and malformed flag values are input errors.
+Logs with missing or multiple command records, unsupported commands, or missing or ambiguous summaries stay not checkable.
+The supported families are `cargo test`, `pytest`, `vitest`, `jest`, `npx vitest`, and `npx jest`, followed by optional arguments.
+Other wrappers and ANSI-colored summaries are unsupported.
+
+The small cargo parser sums completed `test result: ok.` or `test result: FAILED.` summaries across suites.
+A summary must include passed, failed, ignored, measured, filtered-out, and elapsed-seconds fields.
+Each summary requires a preceding `running N tests` header whose count equals passed plus failed plus ignored plus measured.
+A summary without a header, a mismatched total, a duplicate summary, or a suite-start line without a completed summary makes counts not checkable.
+Cargo suite announcements match entire raw lines, preserving their whitespace.
+An executable announcement has five leading ASCII spaces, `Running `, an optional `unittests ` label, the source path, and a parenthesized executable path separated by one space.
+The executable path must contain a forward or backward slash and may use a custom target directory or contain spaces.
+A doc-test announcement has three leading ASCII spaces, `Doc-tests `, and a nonempty crate name containing only letters, digits, underscores, or hyphens.
+Cargo writes these announcements to stderr, while the test harness writes running-count headers and summaries to stdout.
+Merged logs do not preserve stream identity or establish authenticity.
+Malformed or whitespace-altered announcement-shaped lines are ambiguous and make counts not checkable.
+Ordinary stdout such as `Running initialization` or `Running query (cached)` does not start a suite.
+The pytest parser accepts exactly one final count list followed by `in <seconds>s`, optionally surrounded by equals signs or followed by a duration annotation.
+It recognizes passed, failed, errors, skipped, deselected, expected-failure, unexpected-pass, and warning categories using their standard summary tokens.
+Errors contribute to the failure count.
+The JavaScript parser accepts one `Tests` line with pipe-separated categories and a parenthesized total, or one `Tests:` line with comma-separated categories and a final total.
+It recognizes passed, failed, skipped, and todo categories and checks their sum against the total.
+Suite and file totals do not count as test totals.
+Summary candidates are counted before format validation, so a truncated additional summary makes counts not checkable.
+Recognized runner failures, including failed suites or compilation failures, contradict a test-success statement even if its passed count matches.
+Matching passed counts and the explicitly reported failure count confirm the statement.
+An omitted failure count means zero failures.
+When a statement reports failures, ordinary test-failure markers alone cannot resolve missing or ambiguous counts, which stay not checkable.
+Differing counts contradict the statement.
+Each runner diagnostic is either abnormal or an ordinary failure, from one rule table in src/logs.rs that cites the runner source for each line shape.
+An abnormal diagnostic reports an error that the runner's test counts do not contain, so it contradicts the statement whatever counts it reports.
+An ordinary failure marker belongs to tests inside the counts, so it contradicts only a statement that reports no failures.
+Crashes, compilation errors, internal errors, and unhandled errors cannot be accounted for by a test failure count and contradict the statement.
+Vitest's `Errors N error` line and its `Unhandled Errors`, `Source Errors`, and `Failed Suites N` banners are abnormal, including banners inside divider characters.
+A failed suite covers a test file that failed to load or a hook failure that skipped its tests, which the Tests count does not include as failures.
+Vitest writes those banners to stderr, so a stdout-only capture can lack them; a `Test Files` failed total above the `Tests` failed total still shows a file that failed outside its tests, because every failed test fails its own file, and contradicts the statement.
+Vitest's `Type Errors N failed` line counts type tests that are already failed tests in the Tests line, so it is an ordinary failure and matching counts can confirm.
+A type error outside any test appears as a failed suite or an unhandled source error instead, and contradicts.
+Cargo's `process didn't exit successfully:` cause contradicts independently of counted assertion failures, with or without an `error:` prefix.
+Cargo's `could not execute process ... (never executed)` cause, printed when a test binary cannot be launched, also contradicts independently of counted assertion failures, because that target counted nothing.
+Ordinary assertion failures exit with status 101 and omit that cause, so matching complete counts can confirm.
+Jest suite-loading errors also contradict a statement that accurately reports assertion failure counts.
+Pytest collection-error headings, plain or decorated with underscores, contradict independently of the reported failure count.
+Ordinary stdout beginning with FAIL is not a Cargo runner status.
+Cargo diagnostics apply only to Cargo commands, pytest diagnostics only to pytest, and JavaScript diagnostics only to Vitest or Jest.
+All log evidence describes only what the supplied text contains, not execution, authenticity, repository identity, or freshness.
+Truncation between completed suites without a visible next-suite start cannot be detected.
+
+## Command line and output
 
 ```text
 agent-receipts [--repo PATH] [--report PATH|-]
+               [--base COMMIT] [--remote-ref refs/remotes/NAME/BRANCH]
+               [--log COMMAND=PATH]... [--json]
 agent-receipts --help
 agent-receipts --version
 ```
 
-`--repo` defaults to the current directory and can name a subdirectory of a working repository.
-`--report` defaults to `-`, which reads stdin until EOF.
-An interactive terminal without a report fails with an actionable error instead of waiting for input.
-Report file paths resolve from the invocation directory, independently of `--repo`.
-The executable writes a tab-separated verdict table to stdout and operational errors to stderr.
-Columns are `LINE`, `STATEMENT`, `CHECK`, `VERDICT`, and `EVIDENCE`.
-Cell escaping renders tabs, carriage returns, backslashes, and control characters visibly so report text cannot inject rows or terminal escapes.
-Verdicts are `confirmed`, `contradicted`, or `not checkable`.
-The final summary gives the number of each verdict.
-An empty report has no affirmative evidence and exits with code 3.
-The tool never writes to the checked repository or contacts a remote.
-Git subprocesses use explicit arguments without a shell, disable filesystem monitor hooks, and suppress optional index locks.
-Repository-location environment variables are removed so `--repo` selects the repository being checked.
+`--repo` defaults to the current directory and accepts a subdirectory of a working repository.
+`--report` defaults to `-` for stdin until EOF.
+An interactive terminal without a report fails with an actionable error instead of waiting.
+Report file paths resolve from the invocation directory.
+Default stdout is a tab-separated verdict table with `LINE`, `STATEMENT`, `CHECK`, `VERDICT`, and `EVIDENCE` columns and a summary.
+Cell escaping makes tabs, carriage returns, backslashes, control characters, and Unicode format characters visible.
+Errors raised while reading input or evidence use the same escaping.
+`--json` emits one JSON document with stable schema version 1, documented in [README.md](README.md#json-schema).
+JSON retains source text using normal JSON escaping.
+Verdicts are `confirmed`, `contradicted`, and `not checkable` in both formats.
+Operational errors go to stderr, with no successful-results JSON document.
+Help and version exit 0 without opening evidence or reading stdin.
 
 | Exit | Meaning |
 | --- | --- |
@@ -77,63 +174,33 @@ Repository-location environment variables are removed so `--repo` selects the re
 | 2 | Invalid invocation, unreadable input, unavailable Git, or invalid working repository |
 | 3 | No contradictions, but at least one uncheckable statement or no statements |
 
+Per-statement evidence failures stay not checkable.
 Contradictions take precedence over uncheckable statements.
-A per-statement Git failure produces not checkable, never a fabricated contradiction.
-Help and version requests exit 0 without reading input or opening a repository.
 
-## Later evidence adapters
+## Implementation and limits
 
-The proposed `--log COMMAND=PATH` option associates a command with a caller-supplied captured log.
-A test-count check requires a matching command record and an unambiguous completed summary for that command.
-Missing logs, truncated output, multiple possible runs, or unsupported summary formats produce not checkable.
-A summary count different from the report produces contradicted.
-A matching summary confirms only what the supplied log records, not that an untampered command ran in this repository.
-The proposed `--remote-ref REMOTE:REF` option identifies the exact remote branch for a pushed-state check.
-A cached tracking ref cannot establish the current remote state and is not sufficient to confirm `not pushed`.
-A later explicit online mode could obtain a timestamped remote snapshot and compare ancestry against it.
-Such a verdict would be limited to that named ref and observation time, and could not establish that no push ever happened.
-Missing remote evidence produces not checkable.
-These options are not accepted by the walking skeleton.
+This project started on November 24, 2026.
+Git subprocesses define repository facts without adding a Git library.
+Arguments are passed without a shell, optional index locks and filesystem monitor hooks are disabled, and lazy object fetching is disabled.
+An empty Git protocol allowlist denies all transports, including direct promisor fetches.
+Replacement objects, global and system configuration, and inherited configuration overrides are disabled.
+Status is refused before execution when clean or process filters are configured or submodules are present.
+Repository-location environment variables are removed so `--repo` chooses the checked repository.
+External diff drivers and text conversion are disabled for diff checks.
+The command-line parser, fixed grammar, and JSON serializer use established libraries listed in Cargo.toml.
+Integration tests create isolated repositories under the system temp directory, with local fixture identity, signing disabled, and hooks disabled.
+No model calls, credentials, network requests, or report-command execution are needed.
+The tool cannot prove intent, authorship, code quality, report completeness, or evidence authenticity.
+It trusts the local Git executable, its configuration parser, and object store as evidence.
+These checks do not sandbox Git against malformed repositories or establish authenticity of local objects and refs.
+Repository evidence is not an atomic snapshot when another process changes the repository during a check.
 
-## Implementation and exclusions
+## Validation and demo
 
-This is new work started on November 24, 2026.
-Git runs as a subprocess because its object lookup and status behavior already define the facts being checked.
-The executable uses `clap` for arguments and `regex` for the fixed statement grammar.
-Integration tests use `tempfile` for isolated repositories under the system temp directory.
-There are no model calls, network requests, credentials, or commands copied from report text.
-Arbitrary natural-language interpretation, command execution, test-log verification, remote verification, and diff-since-base checks are outside this phase.
-The tool does not prove test execution, intent, authorship, code quality, or report completeness.
-It assumes the local Git executable and object store are trustworthy.
-Repository evidence is not an atomic snapshot if another process changes the repository during verification.
-
-## Test plan
-
-The public seam is the executable with stdin or a report file, a real repository, stdout, stderr, and an exit code.
-Every repository integration test creates its own throwaway Git repository under the system temp directory.
-Tests set local identity and disable signing and hooks without using personal Git configuration.
-Each behavior starts with a failing integration test before its implementation.
-The first slice checks present and missing commits and files in one report.
-The next slice checks clean and dirty trees with staged, unstaged, and untracked changes.
-Further cases cover unsupported claims, empty reports, Markdown, quoted code, invalid paths, unborn HEAD, directories, non-commit objects, and input errors.
-Tests check that workspace-only files do not confirm HEAD presence and that working-copy deletions do not erase HEAD evidence.
-The CI checks are formatting, clippy with warnings denied, integration tests, and a release build.
-
-## Two-minute demo script
-
-All report examples in `examples/` are synthetic.
-The recording uses a fresh temporary repository so the checked repository stays untouched.
-
-| Time | Action |
-| --- | --- |
-| 0:00 to 0:20 | Explain that a report is a set of statements and each verdict includes the evidence it checks. |
-| 0:20 to 0:40 | Create a throwaway repository, add `src/lib.rs`, commit, and capture its real hash. |
-| 0:40 to 1:00 | Pipe a synthetic report with that hash, `File src/lib.rs exists`, and `Tree is clean` into the executable. |
-| 1:00 to 1:20 | Add an untracked file and rerun to show the contradicted clean-tree statement and exit 1. |
-| 1:20 to 1:40 | Add `File src/missing.rs exists` and `77 tests passed` to show contradicted and not checkable verdicts together. |
-| 1:40 to 2:00 | Show the source line numbers, the limited meaning of file presence, and the planned log and remote checks. |
-
-The [GenHacks rules](https://genhacks-open.devpost.com/rules) require new work after November 1, 2026 and disclosure of libraries and AI tools in the project description.
-The submission needs a code link and an embedded demo video of at most three minutes.
-The chosen track is `AI, Agentic Systems, Cybersecurity, and Dev Tools`.
-Registration, eligibility confirmation, publication, the required disclosure, and submission remain outside this phase.
+Each new statement family starts with a failing executable test, and each log parser has focused tests with literal summaries.
+Coverage includes matching and mismatched counts, missing evidence, failed runners, incomplete suites, stale local refs, renamed paths, invalid inputs, JSON, CI exits, and subdirectory selection.
+Checks run formatting, lint with warnings denied, the full suite, a release build, and the executable demos.
+The README records a synthetic report checked against this repository's real history, with captured output.
+The [video script](submission/demo-script.md) fits within three minutes.
+The [submission draft](submission/DEVPOST.md) describes the build and remaining author actions honestly.
+Eligibility, registration, public code publication, a recorded video, tool disclosure, and final submission remain the author's responsibility.
