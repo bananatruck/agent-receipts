@@ -65,7 +65,18 @@ impl Repository {
     }
 
     fn check_with(&self, report: &str, args: &[&str], environment: &[(&str, &str)]) -> Output {
+        self.check_from(report, args, environment, Path::new("."))
+    }
+
+    fn check_from(
+        &self,
+        report: &str,
+        args: &[&str],
+        environment: &[(&str, &str)],
+        invocation: &Path,
+    ) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_agent-receipts"));
+        command.current_dir(invocation);
         if !args.contains(&"--repo") {
             command.arg("--repo").arg(self.path());
         }
@@ -393,20 +404,26 @@ fn unreadable_git_evidence_is_unknown_instead_of_a_contradiction() {
 #[test]
 fn rejects_unpaired_quotes_and_does_not_execute_report_text() {
     let repository = Repository::new();
+    let invocation = tempfile::tempdir().unwrap();
     repository.write("README.md", "fixture\n");
     let hash = repository.commit();
-    let output = repository.check(&format!(
-        "File `README.md exists\nFile README.md` exists\nCommit `{hash} exists\n\
+    let output = repository.check_from(
+        &format!(
+            "File `README.md exists\nFile README.md` exists\nCommit `{hash} exists\n\
          Committed as {hash}`\nCommitted as {hash} if tests pass\n\
          File `$(touch OWNED)` exists\n"
-    ));
+        ),
+        &[],
+        &[],
+        invocation.path(),
+    );
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     for line in 1..=5 {
         assert_verdict(&output, line, "unsupported", "not checkable");
     }
     assert_verdict(&output, 6, "file at HEAD", "contradicted");
     assert!(!repository.path().join("OWNED").exists());
-    assert!(!Path::new("OWNED").exists());
+    assert!(!invocation.path().join("OWNED").exists());
 }
 
 #[test]
@@ -1587,7 +1604,10 @@ fn list_padding_tabs_include_the_original_marker_column() {
 #[cfg(unix)]
 #[test]
 fn pushed_hashes_reject_prefix_collisions_across_object_types() {
-    let repository = Repository::new();
+    let repository = Repository {
+        directory: tempfile::tempdir().unwrap(),
+    };
+    repository.git(&["init", "--initial-branch=main", "--object-format=sha1"]);
     repository.git(&["hash-object", "-w", "-t", "tree", "/dev/null"]);
     repository.write("commit-input", "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nPrefix fixture 10484\n");
     let commit = repository.git(&["hash-object", "-w", "-t", "commit", "commit-input"]);
@@ -1789,4 +1809,343 @@ fn real_cargo_runs_contradict_targets_that_never_ran_or_exited_abnormally() {
             "{fixture} {counts}"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_promisor_blobs_never_start_a_transport() {
+    use std::os::unix::fs::PermissionsExt;
+    let repository = Repository::new();
+    repository.write("old.txt", &"unchanged line\n".repeat(100));
+    let base = repository.commit();
+    let blob = repository.git(&["rev-parse", "HEAD:old.txt"]);
+    fs::remove_file(repository.path().join("old.txt")).unwrap();
+    repository.write(
+        "new.txt",
+        &format!("{}edited\n", "unchanged line\n".repeat(99)),
+    );
+    repository.commit();
+    let helpers = tempfile::tempdir().unwrap();
+    let helper = helpers.path().join("git-remote-audit");
+    fs::write(&helper, "#!/bin/sh\ntouch \"$TRANSPORT_MARKER\"\nexit 1\n").unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+    // Git 2.45 diffcore-rename.c calls promisor_remote_get_direct even when
+    // lazy fetching is disabled. Model that explicit fetch on newer Git too.
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|path| path.join("git"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let wrapper = helpers.path().join("git");
+    fs::write(&wrapper, "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = diff ] && [ ! -f \"$MISSING_OBJECT\" ]; then\n    \"$REAL_GIT\" -C \"$FIXTURE_REPO\" fetch origin >/dev/null 2>&1\n  fi\ndone\nexec \"$REAL_GIT\" \"$@\"\n").unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let marker = helpers.path().join("transport-started");
+    repository.git(&["config", "remote.origin.url", "audit::fixture"]);
+    repository.git(&["config", "remote.origin.promisor", "true"]);
+    repository.git(&["config", "protocol.audit.allow", "always"]);
+    let object = repository
+        .path()
+        .join(".git/objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    let path = format!(
+        "{}:{}",
+        helpers.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let environment = [
+        ("PATH", path.as_str()),
+        ("TRANSPORT_MARKER", marker.to_str().unwrap()),
+        ("GIT_ALLOW_PROTOCOL", "audit"),
+        ("REAL_GIT", real_git.to_str().unwrap()),
+        ("FIXTURE_REPO", repository.path().to_str().unwrap()),
+        ("MISSING_OBJECT", object.to_str().unwrap()),
+    ];
+    let output = repository.check_with(
+        "Renamed old.txt to new.txt\n",
+        &["--base", &base],
+        &environment,
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(!marker.exists());
+    fs::remove_file(&object).unwrap();
+    let output = repository.check_with(
+        "Renamed old.txt to new.txt\n",
+        &["--base", &base],
+        &environment,
+    );
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_verdict(&output, 1, "committed path action", "not checkable");
+    assert!(!marker.exists(), "Git started the configured transport");
+}
+
+#[test]
+fn inexact_renames_ignore_repository_detection_limits() {
+    let repository = Repository::new();
+    for i in 0..3 {
+        repository.write(
+            &format!("old-{i}.txt"),
+            &format!("{}old\n", format!("file {i} unchanged line\n").repeat(100)),
+        );
+    }
+    repository.write("exact.txt", "exact rename\n");
+    let base = repository.commit();
+    for i in 0..3 {
+        fs::remove_file(repository.path().join(format!("old-{i}.txt"))).unwrap();
+        repository.write(
+            &format!("new-{i}.txt"),
+            &format!("{}new\n", format!("file {i} unchanged line\n").repeat(100)),
+        );
+    }
+    repository.git(&["mv", "exact.txt", "moved.txt"]);
+    repository.commit();
+    repository.git(&["config", "diff.renameLimit", "1"]);
+    let output = repository.check_with(
+        "Renamed old-0.txt to new-0.txt\nRenamed exact.txt to moved.txt\n",
+        &["--base", &base],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    for line in 1..=2 {
+        assert_verdict(&output, line, "committed path action", "confirmed");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_checks_reinspect_flags_set_during_status() {
+    use std::os::unix::fs::PermissionsExt;
+    let repository = Repository::new();
+    repository.write("tracked.txt", "before\n");
+    repository.commit();
+    repository.write("tracked.txt", "after\n");
+    let helpers = tempfile::tempdir().unwrap();
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|path| path.join("git"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let wrapper = helpers.path().join("git");
+    let marker = helpers.path().join("status-flags");
+    fs::write(&wrapper, "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = status ]; then\n    \"$REAL_GIT\" -C \"$FIXTURE_REPO\" update-index \"$INDEX_FLAG\" tracked.txt || exit\n    printf '%s\\n' \"$INDEX_FLAG\" >> \"$STATUS_MARKER\" || exit\n  fi\ndone\nexec \"$REAL_GIT\" \"$@\"\n").unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        helpers.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    for flag in ["--skip-worktree", "--assume-unchanged"] {
+        fs::write(&marker, "").unwrap();
+        repository.git(&["update-index", "--no-skip-worktree", "tracked.txt"]);
+        repository.git(&["update-index", "--no-assume-unchanged", "tracked.txt"]);
+        let output = repository.check_with(
+            "Tree is clean\n",
+            &[],
+            &[
+                ("PATH", &path),
+                ("REAL_GIT", real_git.to_str().unwrap()),
+                ("FIXTURE_REPO", repository.path().to_str().unwrap()),
+                ("INDEX_FLAG", flag),
+                ("STATUS_MARKER", marker.to_str().unwrap()),
+            ],
+        );
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap(),
+            format!("{flag}\n"),
+            "status must set {flag} during this check"
+        );
+        assert_eq!(output.status.code(), Some(3), "{flag}: {output:?}");
+        assert_verdict(&output, 1, "working tree clean", "not checkable");
+    }
+}
+
+#[test]
+fn cargo_summary_status_must_agree_with_each_suites_failures() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mapping = format!("cargo test={}", log.path().display());
+    for (first, second, verdict) in [
+        (
+            "FAILED. 1 passed; 0 failed",
+            "FAILED. 0 passed; 1 failed",
+            "not checkable",
+        ),
+        (
+            "ok. 1 passed; 0 failed",
+            "FAILED. 0 passed; 1 failed",
+            "confirmed",
+        ),
+        (
+            "ok. 0 passed; 1 failed",
+            "ok. 1 passed; 0 failed",
+            "not checkable",
+        ),
+    ] {
+        fs::write(log.path(), format!("$ cargo test\nrunning 1 test\ntest result: {first}; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\nrunning 1 test\ntest result: {second}; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n")).unwrap();
+        for args in [
+            vec!["--log", mapping.as_str()],
+            vec!["--log", mapping.as_str(), "--json"],
+        ] {
+            let output =
+                repository.check_with("Ran `cargo test`, 1 passed, 1 failed\n", &args, &[]);
+            let expected = if verdict == "confirmed" { 0 } else { 3 };
+            assert_eq!(output.status.code(), Some(expected), "{first}: {output:?}");
+            if args.contains(&"--json") {
+                let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(json["statements"][0]["verdict"], verdict);
+                assert_eq!(json["exit_code"], expected);
+            } else {
+                assert_verdict(&output, 1, "test counts in supplied log", verdict);
+            }
+        }
+    }
+}
+
+#[test]
+fn malformed_vitest_file_totals_cannot_determine_a_verdict() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mapping = format!("vitest={}", log.path().display());
+    for (files, tests, counts, extra, verdict) in [
+        (
+            "2 failed (1)",
+            "1 failed (1)",
+            "0 passed, 1 failed",
+            "",
+            "not checkable",
+        ),
+        (
+            "2 failed (1)",
+            "1 passed (1)",
+            "1 passed",
+            "",
+            "not checkable",
+        ),
+        (
+            "1 failed | 1 passed (1)",
+            "1 failed (1)",
+            "0 passed, 1 failed",
+            "",
+            "not checkable",
+        ),
+        (
+            "2 failed (",
+            "1 failed (1)",
+            "0 passed, 1 failed",
+            "",
+            "not checkable",
+        ),
+        (
+            "18446744073709551616 failed (1)",
+            "1 failed (1)",
+            "0 passed, 1 failed",
+            "",
+            "not checkable",
+        ),
+        (
+            "1 failed | 18446744073709551615 passed (1)",
+            "1 failed (1)",
+            "0 passed, 1 failed",
+            "",
+            "not checkable",
+        ),
+        (
+            "2 failed (1)",
+            "1 failed (1)",
+            "0 passed, 1 failed",
+            "Errors 1 error\n",
+            "contradicted",
+        ),
+        (
+            "2 failed (2)",
+            "1 failed (1)",
+            "0 passed, 1 failed",
+            "",
+            "contradicted",
+        ),
+        (
+            "1 failed (1)",
+            "1 failed (1)",
+            "0 passed, 1 failed",
+            "",
+            "confirmed",
+        ),
+    ] {
+        fs::write(
+            log.path(),
+            format!("$ vitest\nTest Files {files}\nTests {tests}\n{extra}"),
+        )
+        .unwrap();
+        for json in [false, true] {
+            let mut args = vec!["--log", mapping.as_str()];
+            if json {
+                args.push("--json");
+            }
+            let output = repository.check_with(&format!("Ran `vitest`, {counts}\n"), &args, &[]);
+            let expected = match verdict {
+                "confirmed" => 0,
+                "contradicted" => 1,
+                _ => 3,
+            };
+            assert_eq!(output.status.code(), Some(expected), "{files}: {output:?}");
+            if json {
+                let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(doc["statements"][0]["verdict"], verdict);
+                assert_eq!(doc["exit_code"], expected);
+            } else {
+                assert_verdict(&output, 1, "test counts in supplied log", verdict);
+            }
+        }
+    }
+}
+
+#[test]
+fn fences_distinguish_ascii_closers_and_single_tilde_info() {
+    let repository = Repository::new();
+    repository.write("a.txt", "fixture\n");
+    repository.commit();
+    let mut failures = Vec::new();
+    for (report, confirmed) in [
+        ("```\n\u{a0}```\nTree is clean\n", 0),
+        ("```\n```\u{a0}\nTree is clean\n", 0),
+        ("```\n\u{2003}```\nTree is clean\n", 0),
+        ("```\n```\u{2003}\nTree is clean\n", 0),
+        ("```\n  ``` \t\nTree is clean\n", 1),
+        ("~~~ text title=\"a~b\"\nTree is clean\n~~~\n", 0),
+        ("~~~ text title=\"a~b~c\"\nTree is clean\n~~~\n", 0),
+        ("``` text title=\"a`b\"\nTree is clean\n", 1),
+        ("~~~cargo test~~~ failed\nTree is clean\n", 1),
+    ] {
+        for json in [false, true] {
+            let args = if json { vec!["--json"] } else { vec![] };
+            let output = repository.check_with(report, &args, &[]);
+            let actual = if json {
+                let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(doc["exit_code"], output.status.code().unwrap());
+                doc["summary"]["confirmed"].as_u64().unwrap()
+            } else {
+                stdout(&output).matches("\tconfirmed\t").count() as u64
+            };
+            let expected_exit = if report == "```\n  ``` \t\nTree is clean\n" {
+                0
+            } else {
+                3
+            };
+            assert_eq!(
+                output.status.code(),
+                Some(expected_exit),
+                "{report:?}: {output:?}"
+            );
+            if confirmed == 0 && !json {
+                let tree_line = report
+                    .lines()
+                    .position(|line| line == "Tree is clean")
+                    .unwrap()
+                    + 1;
+                assert_verdict(&output, tree_line, "unsupported", "not checkable");
+            }
+            if actual != confirmed {
+                failures.push(format!("{report:?}: {}", stdout(&output)));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

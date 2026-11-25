@@ -52,6 +52,7 @@ Use `--base COMMIT` for path scope and action checks.
 The diff compares that commit's tree with HEAD's tree and excludes working-tree changes and intermediate edits later undone.
 Both endpoints of a rename count as touched paths.
 Git's 50 percent similarity threshold determines rename status.
+The exhaustive rename limit is disabled so repository configuration cannot skip detection.
 
 Use `--remote-ref refs/remotes/origin/main` for pushed-state checks against an existing local tracking ref.
 Bare statements check HEAD, independently of commit-existence statements elsewhere in the report.
@@ -193,6 +194,8 @@ The program uses fixed grammar rather than arbitrary natural-language interpreta
 It cannot prove code quality, intent, authorship, report completeness, evidence authenticity, or when tests ran.
 An endpoint diff cannot reveal every path edited during a session.
 A clean-tree check excludes ignored files and describes only its observation time.
+Index visibility is checked before and after status.
+This catches flags left set during status but cannot detect every transient concurrent change.
 Configured clean or process filters, hidden index entries marked assume-unchanged or skip-worktree, and submodule worktrees make cleanliness not checkable.
 File actions on submodule entries are also not checkable.
 File checks inspect stored HEAD entries without following intermediate symlinks.
@@ -202,6 +205,7 @@ JSON preserves the original strings and is intended for consumers that handle di
 
 The program trusts the installed Git executable, its configuration parser, and the local object store as evidence.
 It reads repository configuration but disables replacement objects, filesystem monitor hooks, external diff drivers, text conversion, and lazy fetching.
+An empty Git protocol allowlist also blocks direct promisor fetches.
 Global and system Git configuration and inherited configuration overrides are excluded.
 It checks filter configuration before status and refuses filtered repositories or submodule worktrees instead of running their configured programs.
 These precautions do not make Git a sandbox for corrupted repositories or prove that local objects and refs are authentic.

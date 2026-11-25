@@ -63,6 +63,9 @@ impl Repository {
             ])
             .arg(&self.path)
             .args(args)
+            // git(1): an empty allowlist denies every transport, including
+            // direct promisor prefetches that bypass the lazy-fetch guard.
+            .env("GIT_ALLOW_PROTOCOL", "")
             .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -122,6 +125,8 @@ impl Repository {
             "--name-status",
             "-z",
             "--find-renames=50%",
+            // git-diff(1): zero disables the exhaustive rename limit.
+            "-l0",
             &base,
             &head,
             "--",
@@ -370,6 +375,32 @@ impl Repository {
             }
             _ => return Err("cannot inspect repository filter configuration".into()),
         }
+        self.check_index_visibility()?;
+
+        let output = self.git(&[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ])?;
+        let status = successful_text(output)?;
+        // Status can ignore entries whose flags changed after preflight.
+        // Recheck before trusting it; repository reads are not atomic.
+        self.check_index_visibility()?;
+        Ok(if status.is_empty() {
+            Finding {
+                verdict: Verdict::Confirmed,
+                evidence: "git status --porcelain=v1 --untracked-files=all --ignore-submodules=none returned no changes; ignored files excluded".into(),
+            }
+        } else {
+            Finding {
+                verdict: Verdict::Contradicted,
+                evidence: format!("git status reports changes: {}", status.trim_end()),
+            }
+        })
+    }
+
+    fn check_index_visibility(&self) -> Result<(), String> {
         let stages = successful_text(self.git(&["ls-files", "--stage", "-z"])?)?;
         if stages
             .split_terminator('\0')
@@ -387,24 +418,7 @@ impl Repository {
             return Err("index has assume-unchanged or skip-worktree entries; working-tree cleanliness is not checkable".into());
         }
 
-        let output = self.git(&[
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            "--ignore-submodules=none",
-        ])?;
-        let status = successful_text(output)?;
-        Ok(if status.is_empty() {
-            Finding {
-                verdict: Verdict::Confirmed,
-                evidence: "git status --porcelain=v1 --untracked-files=all --ignore-submodules=none returned no changes; ignored files excluded".into(),
-            }
-        } else {
-            Finding {
-                verdict: Verdict::Contradicted,
-                evidence: format!("git status reports changes: {}", status.trim_end()),
-            }
-        })
+        Ok(())
     }
 }
 
