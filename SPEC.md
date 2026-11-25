@@ -120,8 +120,11 @@ Summary candidates are counted before format validation, so a truncated addition
 Recognized runner failures, including failed suites or compilation failures, contradict a test-success statement even if its passed count matches.
 Matching passed counts and the explicitly reported failure count confirm the statement.
 An omitted failure count means zero failures.
+When a statement reports failures, ordinary test-failure markers alone cannot resolve missing or ambiguous counts, which stay not checkable.
 Differing counts contradict the statement.
 Crashes, compilation errors, internal errors, and unhandled errors cannot be accounted for by a test failure count and contradict the statement.
+Cargo's `process didn't exit successfully:` cause contradicts independently of counted assertion failures, with or without an `error:` prefix.
+Ordinary assertion failures exit with status 101 and omit that cause, so matching complete counts can confirm.
 Jest suite-loading errors also contradict a statement that accurately reports assertion failure counts.
 Pytest collection-error headings, plain or decorated with underscores, contradict independently of the reported failure count.
 Ordinary stdout beginning with FAIL is not a Cargo runner status.

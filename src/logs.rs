@@ -68,7 +68,7 @@ impl Logs {
                         _ => return Err("unsupported command family"),
                     };
                 let counts = parser(body);
-                if runner_failure(command, body, counts.as_ref().is_some_and(|c| c.failed > 0)) {
+                if runner_failure(command, body, failed.unwrap_or(0) > 0) {
                     return Ok(None);
                 }
                 counts
@@ -463,9 +463,12 @@ fn javascript_summary(text: &str) -> Option<Counts> {
     (sum == total).then_some(counts)
 }
 
-fn runner_failure(command: &str, text: &str, counted_failures: bool) -> bool {
+fn runner_failure(command: &str, text: &str, reported_failures: bool) -> bool {
+    // Abnormal exits have an unprefixed cause even when other suites counted
+    // assertion failures. Normal assertion exits use 101 and omit that cause.
     static CARGO_FATAL: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^error: (?:could not compile|process didn't exit successfully)").unwrap()
+        Regex::new(r"^(?:error: could not compile|(?:error: )?process didn't exit successfully:)")
+            .unwrap()
     });
     static CARGO_FAILED: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"^(?:error: (?:test failed|[0-9]+ targets? failed)|test result: FAILED\.)")
@@ -484,7 +487,7 @@ fn runner_failure(command: &str, text: &str, counted_failures: bool) -> bool {
     };
     text.lines().map(str::trim).any(|line| match runner {
         Some("cargo") => {
-            CARGO_FATAL.is_match(line) || (!counted_failures && CARGO_FAILED.is_match(line))
+            CARGO_FATAL.is_match(line) || (!reported_failures && CARGO_FAILED.is_match(line))
         }
         Some("pytest") => {
             line.starts_with("INTERNALERROR>")
@@ -498,7 +501,7 @@ fn runner_failure(command: &str, text: &str, counted_failures: bool) -> bool {
                 || (runner == Some("jest")
                     && line.strip_prefix('●').unwrap_or(line).trim_start()
                         == "Test suite failed to run")
-                || (!counted_failures
+                || (!reported_failures
                     && (JAVASCRIPT_FAILED.is_match(line) || line.starts_with("FAIL ")))
         }
         _ => false,

@@ -1048,6 +1048,77 @@ fn matching_failure_counts_are_valid_evidence_and_stdout_is_not_runner_status() 
 }
 
 #[test]
+fn cargo_abnormal_exit_causes_are_independent_of_assertion_failure_counts() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let command = "cargo test -q --no-fail-fast";
+    let assertion = "running 1 test\nassertion --- FAILED\n\nfailures:\n    assertion\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\nerror: test failed, to rerun pass `--test a_assertion`\n";
+    for (tail, expected, verdict) in [
+        (
+            "error: test failed, to rerun pass `--test z_abnormal`\n\nCaused by:\n  process didn't exit successfully: `/tmp/fixture/target/debug/deps/z_abnormal-1234` (exit status: 4)\nerror: 2 targets failed:\n    `--test a_assertion`\n    `--test z_abnormal`\n",
+            1,
+            "contradicted",
+        ),
+        (
+            "Caused by:\n  process didn't exit successfully: `/tmp/fixture/target/debug/deps/z_abnormal-1234` (signal: 11, SIGSEGV: invalid memory reference)\n",
+            1,
+            "contradicted",
+        ),
+        (
+            "error: process didn't exit successfully: `/tmp/fixture/target/debug/deps/z_abnormal-1234` (exit status: 4)\n",
+            1,
+            "contradicted",
+        ),
+        (
+            "error: 1 target failed:\n    `--test a_assertion`\n",
+            0,
+            "confirmed",
+        ),
+        ("running 1 test\n", 3, "not checkable"),
+    ] {
+        fs::write(log.path(), format!("$ {command}\n{assertion}{tail}")).unwrap();
+        let mapping = format!("{command}={}", log.path().display());
+        let report = format!("Ran `{command}`, 0 passed, 1 failed\n");
+        let output = repository.check_with(&report, &["--log", &mapping], &[]);
+        assert_eq!(output.status.code(), Some(expected), "{}", stdout(&output));
+        assert_verdict(&output, 1, "test counts in supplied log", verdict);
+
+        let output = repository.check_with(&report, &["--log", &mapping, "--json"], &[]);
+        assert_eq!(output.status.code(), Some(expected), "{}", stdout(&output));
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["exit_code"], expected);
+        assert_eq!(json["statements"][0]["verdict"], verdict);
+    }
+}
+
+#[test]
+fn reported_failures_do_not_resolve_ambiguous_test_counts() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    for (command, body) in [
+        ("cargo test", "error: test failed, to rerun pass `--lib`\n"),
+        (
+            "cargo test",
+            "running 1 test\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\nerror: test failed, to rerun pass `--lib`\n     Running tests/later.rs (target/debug/deps/later-1234)\n",
+        ),
+        ("jest", "FAIL assertion.test.js\nTests: 1 failed,\n"),
+        ("npx jest", "Test Suites: 1 failed, 1 total\nTests:\n"),
+        ("vitest", "Test Files 1 failed (1)\nTests 1 failed (\n"),
+        ("npx vitest", "FAIL assertion.test.js\n"),
+        ("pytest", "1 failed in\n"),
+    ] {
+        fs::write(log.path(), format!("$ {command}\n{body}")).unwrap();
+        let output = repository.check_with(
+            &format!("Ran `{command}`, 0 passed, 1 failed\n"),
+            &["--log", &format!("{command}={}", log.path().display())],
+            &[],
+        );
+        assert_eq!(output.status.code(), Some(3), "{}", stdout(&output));
+        assert_verdict(&output, 1, "test counts in supplied log", "not checkable");
+    }
+}
+
+#[test]
 fn additions_and_deletions_check_endpoints_despite_rename_similarity() {
     let repository = Repository::new();
     repository.write("old.rs", "same content\n");
@@ -1369,6 +1440,10 @@ fn runner_diagnostics_are_scoped_to_the_command_family() {
             (
                 "cargo",
                 "error: process didn't exit successfully: signal: 11",
+            ),
+            (
+                "cargo",
+                "  process didn't exit successfully: `target/debug/deps/fixture` (exit status: 4)",
             ),
             ("cargo", "error: test failed, to rerun pass --lib"),
             ("cargo", "error: 1 target failed:"),
