@@ -1619,7 +1619,10 @@ fn real_vitest_runs_separate_counted_failures_from_errors_outside_the_counts() {
     // counts failed type tests, which the Tests line already includes. Failed
     // suites and unhandled errors are outside the Tests count.
     let repository = Repository::new();
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vitest-3.2.4");
+    // Cargo runs integration tests from the package root. A relative path
+    // keeps the checkout's own name, which may contain the `=` that --log
+    // splits on, out of the log mapping.
+    let fixtures = Path::new("tests/fixtures/vitest-3.2.4");
     for (fixture, command, counts, verdict) in [
         (
             "assertion",
