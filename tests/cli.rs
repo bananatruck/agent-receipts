@@ -1857,3 +1857,35 @@ fn missing_promisor_blobs_never_start_a_transport() {
     assert_verdict(&output, 1, "committed path action", "not checkable");
     assert!(!marker.exists(), "Git started the configured transport");
 }
+
+#[test]
+fn inexact_renames_ignore_repository_detection_limits() {
+    let repository = Repository::new();
+    for i in 0..3 {
+        repository.write(
+            &format!("old-{i}.txt"),
+            &format!("{}old\n", format!("file {i} unchanged line\n").repeat(100)),
+        );
+    }
+    repository.write("exact.txt", "exact rename\n");
+    let base = repository.commit();
+    for i in 0..3 {
+        fs::remove_file(repository.path().join(format!("old-{i}.txt"))).unwrap();
+        repository.write(
+            &format!("new-{i}.txt"),
+            &format!("{}new\n", format!("file {i} unchanged line\n").repeat(100)),
+        );
+    }
+    repository.git(&["mv", "exact.txt", "moved.txt"]);
+    repository.commit();
+    repository.git(&["config", "diff.renameLimit", "1"]);
+    let output = repository.check_with(
+        "Renamed old-0.txt to new-0.txt\nRenamed exact.txt to moved.txt\n",
+        &["--base", &base],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    for line in 1..=2 {
+        assert_verdict(&output, line, "committed path action", "confirmed");
+    }
+}

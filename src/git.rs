@@ -125,6 +125,8 @@ impl Repository {
             "--name-status",
             "-z",
             "--find-renames=50%",
+            // git-diff(1): zero disables the exhaustive rename limit.
+            "-l0",
             &base,
             &head,
             "--",

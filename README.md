@@ -52,6 +52,7 @@ Use `--base COMMIT` for path scope and action checks.
 The diff compares that commit's tree with HEAD's tree and excludes working-tree changes and intermediate edits later undone.
 Both endpoints of a rename count as touched paths.
 Git's 50 percent similarity threshold determines rename status.
+The exhaustive rename limit is disabled so repository configuration cannot skip detection.
 
 Use `--remote-ref refs/remotes/origin/main` for pushed-state checks against an existing local tracking ref.
 Bare statements check HEAD, independently of commit-existence statements elsewhere in the report.
