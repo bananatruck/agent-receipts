@@ -202,6 +202,7 @@ JSON preserves the original strings and is intended for consumers that handle di
 
 The program trusts the installed Git executable, its configuration parser, and the local object store as evidence.
 It reads repository configuration but disables replacement objects, filesystem monitor hooks, external diff drivers, text conversion, and lazy fetching.
+An empty Git protocol allowlist also blocks direct promisor fetches.
 Global and system Git configuration and inherited configuration overrides are excluded.
 It checks filter configuration before status and refuses filtered repositories or submodule worktrees instead of running their configured programs.
 These precautions do not make Git a sandbox for corrupted repositories or prove that local objects and refs are authentic.

@@ -179,6 +179,7 @@ Contradictions take precedence over uncheckable statements.
 This project started on November 24, 2026.
 Git subprocesses define repository facts without adding a Git library.
 Arguments are passed without a shell, optional index locks and filesystem monitor hooks are disabled, and lazy object fetching is disabled.
+An empty Git protocol allowlist denies all transports, including direct promisor fetches.
 Replacement objects, global and system configuration, and inherited configuration overrides are disabled.
 Status is refused before execution when clean or process filters are configured or submodules are present.
 Repository-location environment variables are removed so `--repo` chooses the checked repository.

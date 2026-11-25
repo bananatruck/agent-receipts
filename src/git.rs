@@ -63,6 +63,9 @@ impl Repository {
             ])
             .arg(&self.path)
             .args(args)
+            // git(1): an empty allowlist denies every transport, including
+            // direct promisor prefetches that bypass the lazy-fetch guard.
+            .env("GIT_ALLOW_PROTOCOL", "")
             .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")

@@ -1790,3 +1790,70 @@ fn real_cargo_runs_contradict_targets_that_never_ran_or_exited_abnormally() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn missing_promisor_blobs_never_start_a_transport() {
+    use std::os::unix::fs::PermissionsExt;
+    let repository = Repository::new();
+    repository.write("old.txt", &"unchanged line\n".repeat(100));
+    let base = repository.commit();
+    let blob = repository.git(&["rev-parse", "HEAD:old.txt"]);
+    fs::remove_file(repository.path().join("old.txt")).unwrap();
+    repository.write(
+        "new.txt",
+        &format!("{}edited\n", "unchanged line\n".repeat(99)),
+    );
+    repository.commit();
+    let helpers = tempfile::tempdir().unwrap();
+    let helper = helpers.path().join("git-remote-audit");
+    fs::write(&helper, "#!/bin/sh\ntouch \"$TRANSPORT_MARKER\"\nexit 1\n").unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+    // Git 2.45 diffcore-rename.c calls promisor_remote_get_direct even when
+    // lazy fetching is disabled. Model that explicit fetch on newer Git too.
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|path| path.join("git"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let wrapper = helpers.path().join("git");
+    fs::write(&wrapper, "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = diff ] && [ ! -f \"$MISSING_OBJECT\" ]; then\n    \"$REAL_GIT\" -C \"$FIXTURE_REPO\" fetch origin >/dev/null 2>&1\n  fi\ndone\nexec \"$REAL_GIT\" \"$@\"\n").unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let marker = helpers.path().join("transport-started");
+    repository.git(&["config", "remote.origin.url", "audit::fixture"]);
+    repository.git(&["config", "remote.origin.promisor", "true"]);
+    repository.git(&["config", "protocol.audit.allow", "always"]);
+    let object = repository
+        .path()
+        .join(".git/objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    let path = format!(
+        "{}:{}",
+        helpers.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let environment = [
+        ("PATH", path.as_str()),
+        ("TRANSPORT_MARKER", marker.to_str().unwrap()),
+        ("GIT_ALLOW_PROTOCOL", "audit"),
+        ("REAL_GIT", real_git.to_str().unwrap()),
+        ("FIXTURE_REPO", repository.path().to_str().unwrap()),
+        ("MISSING_OBJECT", object.to_str().unwrap()),
+    ];
+    let output = repository.check_with(
+        "Renamed old.txt to new.txt\n",
+        &["--base", &base],
+        &environment,
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(!marker.exists());
+    fs::remove_file(&object).unwrap();
+    let output = repository.check_with(
+        "Renamed old.txt to new.txt\n",
+        &["--base", &base],
+        &environment,
+    );
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_verdict(&output, 1, "committed path action", "not checkable");
+    assert!(!marker.exists(), "Git started the configured transport");
+}
