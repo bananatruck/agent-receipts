@@ -25,6 +25,7 @@ Author disclosure: [List the AI coding tools used before submitting.]
 
 Supplied logs establish only what their text records, not whether an authentic command ran in this checkout.
 Incomplete additional summaries stay not checkable, and matching failure counts cannot account for runner execution errors.
+Pytest collection errors also prevent confirmation when the reported failure count matches.
 A local tracking ref can be stale and cannot establish the server's present state or prove a push happened.
 Diff checks compare committed endpoint trees and do not establish everything edited during a session.
 The parser accepts documented statement forms rather than arbitrary prose.

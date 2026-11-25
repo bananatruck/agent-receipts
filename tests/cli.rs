@@ -1206,6 +1206,42 @@ fn suite_loading_errors_cannot_be_accounted_for_by_failed_test_counts() {
 }
 
 #[test]
+fn pytest_collection_errors_cannot_be_accounted_for_by_failed_test_counts() {
+    let repository = Repository::new();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    for heading in [
+        "_____ ERROR collecting test_broken.py _____",
+        "ERROR collecting test_broken.py",
+    ] {
+        fs::write(
+            log.path(),
+            format!("$ pytest\n{heading}\n1 error in 0.10s\n"),
+        )
+        .unwrap();
+        let output = repository.check_with(
+            "Ran `pytest`, 0 passed, 1 failed\n",
+            &["--log", &format!("pytest={}", log.path().display())],
+            &[],
+        );
+        assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+        assert_verdict(&output, 1, "test counts in supplied log", "contradicted");
+    }
+
+    fs::write(
+        log.path(),
+        "$ pytest\n_____ test_assertion _____\nE assert 1 == 2\n1 failed in 0.10s\n",
+    )
+    .unwrap();
+    let output = repository.check_with(
+        "Ran `pytest`, 0 passed, 1 failed\n",
+        &["--log", &format!("pytest={}", log.path().display())],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stdout(&output));
+    assert_verdict(&output, 1, "test counts in supplied log", "confirmed");
+}
+
+#[test]
 fn runner_diagnostics_are_scoped_to_the_command_family() {
     let repository = Repository::new();
     let log = tempfile::NamedTempFile::new().unwrap();
@@ -1233,6 +1269,10 @@ fn runner_diagnostics_are_scoped_to_the_command_family() {
             ("cargo", "test result: FAILED."),
             ("pytest", "INTERNALERROR> RuntimeError: fixture"),
             ("pytest", "ERROR collecting tests/test_fixture.py"),
+            (
+                "pytest",
+                "_____ ERROR collecting tests/test_fixture.py _____",
+            ),
             ("javascript", "Unhandled Errors"),
             ("javascript", "Errors 1 error"),
             ("javascript", "Type Errors 1 error"),

@@ -74,6 +74,7 @@ An incomplete additional summary makes counts not checkable.
 Failures contradict test-success statements, even when the passed count matches.
 A statement that explicitly reports a nonzero failure count can confirm when both counts match.
 Runner errors outside those test counts, such as crashes, internal errors, or unhandled errors, contradict the statement.
+Pytest collection errors, including underscore-decorated headings, contradict even matching failure counts.
 Diagnostics are recognized only for the corresponding command family.
 The output states that a supplied log is evidence only of its contents, not authentic execution in this checkout.
 

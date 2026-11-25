@@ -343,7 +343,11 @@ fn runner_failure(command: &str, text: &str, counted_failures: bool) -> bool {
             CARGO_FATAL.is_match(line) || (!counted_failures && CARGO_FAILED.is_match(line))
         }
         Some("pytest") => {
-            line.starts_with("INTERNALERROR>") || line.starts_with("ERROR collecting ")
+            line.starts_with("INTERNALERROR>")
+                || line
+                    .trim_matches('_')
+                    .trim()
+                    .starts_with("ERROR collecting ")
         }
         Some("vitest" | "jest") => {
             JAVASCRIPT_FATAL.is_match(line)
