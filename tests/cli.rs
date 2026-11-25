@@ -1924,7 +1924,8 @@ fn clean_checks_reinspect_flags_set_during_status() {
         .find(|path| path.is_file())
         .unwrap();
     let wrapper = helpers.path().join("git");
-    fs::write(&wrapper, "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = status ]; then\n    \"$REAL_GIT\" -C \"$FIXTURE_REPO\" update-index \"$INDEX_FLAG\" tracked.txt || exit\n  fi\ndone\nexec \"$REAL_GIT\" \"$@\"\n").unwrap();
+    let marker = helpers.path().join("status-flags");
+    fs::write(&wrapper, "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = status ]; then\n    \"$REAL_GIT\" -C \"$FIXTURE_REPO\" update-index \"$INDEX_FLAG\" tracked.txt || exit\n    printf '%s\\n' \"$INDEX_FLAG\" >> \"$STATUS_MARKER\" || exit\n  fi\ndone\nexec \"$REAL_GIT\" \"$@\"\n").unwrap();
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
     let path = format!(
         "{}:{}",
@@ -1932,12 +1933,9 @@ fn clean_checks_reinspect_flags_set_during_status() {
         std::env::var("PATH").unwrap()
     );
     for flag in ["--skip-worktree", "--assume-unchanged"] {
-        repository.git(&[
-            "update-index",
-            "--no-skip-worktree",
-            "--no-assume-unchanged",
-            "tracked.txt",
-        ]);
+        fs::write(&marker, "").unwrap();
+        repository.git(&["update-index", "--no-skip-worktree", "tracked.txt"]);
+        repository.git(&["update-index", "--no-assume-unchanged", "tracked.txt"]);
         let output = repository.check_with(
             "Tree is clean\n",
             &[],
@@ -1946,7 +1944,13 @@ fn clean_checks_reinspect_flags_set_during_status() {
                 ("REAL_GIT", real_git.to_str().unwrap()),
                 ("FIXTURE_REPO", repository.path().to_str().unwrap()),
                 ("INDEX_FLAG", flag),
+                ("STATUS_MARKER", marker.to_str().unwrap()),
             ],
+        );
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap(),
+            format!("{flag}\n"),
+            "status must set {flag} during this check"
         );
         assert_eq!(output.status.code(), Some(3), "{flag}: {output:?}");
         assert_verdict(&output, 1, "working tree clean", "not checkable");
